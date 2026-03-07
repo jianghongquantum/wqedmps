@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.13"
 
 [[package]]
@@ -240,7 +240,7 @@ requires-dist = [
     { name = "ncon", specifier = ">=2.0.0" },
     { name = "numpy", specifier = ">=2.4.2" },
     { name = "scipy", specifier = ">=1.17.1" },
-    { name = "seemps" },
+    { name = "seemps", git = "https://github.com/juanjosegarciaripoll/seemps2.git" },
 ]
 
 [package.metadata.requires-dev]
@@ -927,22 +927,11 @@ wheels = [
 [[package]]
 name = "seemps"
 version = "3.0.0"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/juanjosegarciaripoll/seemps2.git#42102579b9be472fed03d070fadf28b680060aa8" }
 dependencies = [
     { name = "h5py" },
     { name = "numpy" },
     { name = "scipy" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/27/b2/a59e2b5865ce8a969ca4c5975bea1430988565b18e4fb4e098cee22212d8/seemps-3.0.0.tar.gz", hash = "sha256:d8789898246936a52123b94ff7e5f8a826b264c0eee4fe6a8f0467b55a5941b6", size = 260713, upload-time = "2026-01-23T10:21:56.691Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/7e/1e/5cf5f976693ecf04ddcb900d0f054c1e195dafc3f6d7d4a0235d962ec53c/seemps-3.0.0-cp313-cp313-macosx_15_0_arm64.whl", hash = "sha256:12d2bf3ebec19b8d68a36cae9f17bb932c6c4f8bc73cf1ebe7ed932e9ea106b4", size = 243555, upload-time = "2026-01-23T10:21:47.849Z" },
-    { url = "https://files.pythonhosted.org/packages/29/1d/ba9577f72c0ba403cc6513a5fc5fa07d6a48f7df85139e805908bfdf40ad/seemps-3.0.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:81905ae100330a82a99f8a017dfa7ad3b7a8440cfe944a1bcdd0bf80dcc83fe4", size = 564119, upload-time = "2026-01-23T10:21:48.804Z" },
-    { url = "https://files.pythonhosted.org/packages/a3/3f/b62c96bb28c559c6935d655d72260f1359b848e3554510f4962a5e2c303c/seemps-3.0.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:8ac98e262b97e16130f58e3dff1bfca79842eb0eff07cf1c473ade706764f463", size = 559041, upload-time = "2026-01-23T10:21:49.837Z" },
-    { url = "https://files.pythonhosted.org/packages/cf/4c/216f385ce0429131c25c70e68c97b9451a9134343bf56addc2682859f33f/seemps-3.0.0-cp313-cp313-win_amd64.whl", hash = "sha256:0d6c5936860e6d6cd8217743ac7caa79fefb211a2e4d61edb13fb315b360c564", size = 236136, upload-time = "2026-01-23T10:21:50.784Z" },
-    { url = "https://files.pythonhosted.org/packages/fa/1f/197c84c98bbb9e029c64871cca83b1f99e4fe988b86f0b4475fcc1dc7db0/seemps-3.0.0-cp314-cp314-macosx_15_0_arm64.whl", hash = "sha256:bc7736c196d1d722b78d00ea3a3287656ffce79c729cdf9e23a21c43f9b497ee", size = 243964, upload-time = "2026-01-23T10:21:52.11Z" },
-    { url = "https://files.pythonhosted.org/packages/17/92/bf77580bbfa6c635e7aa12d1257ea1c9842a9b511402c721a6b0060365c9/seemps-3.0.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:fbdac49e14f9faecb8da0222e33e2a8beef2f08fed9b2611359d282a357afb86", size = 560677, upload-time = "2026-01-23T10:21:53.063Z" },
-    { url = "https://files.pythonhosted.org/packages/6d/5a/596dfad6e9da928baa7a05ae64b0e0603d2edd4608e12225d3e9cb8f83d3/seemps-3.0.0-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:03a8cddeb37a4eef6ac44d2ac3d266c8d64cfd0a93faf1168b228f4e36c43fb3", size = 556217, upload-time = "2026-01-23T10:21:54.526Z" },
-    { url = "https://files.pythonhosted.org/packages/55/cd/df702247f797887fd6e8d033e97159722c8bbba10db7d5bf5eadef6bfa04/seemps-3.0.0-cp314-cp314-win_amd64.whl", hash = "sha256:3926ca288778b80eb7b749db86a917d7c7ed8c76d75eb4f321f64c542831099c", size = 238058, upload-time = "2026-01-23T10:21:55.7Z" },
 ]
 
 [[package]]
