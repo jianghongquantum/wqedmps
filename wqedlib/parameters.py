@@ -105,6 +105,7 @@ class InputParams:
     gamma_r2: float = 0.0
     tau: float = 0.0
     phase: float = 0.0
+    atol: float = 1e-12
 
     def __post_init__(self) -> None:
         """

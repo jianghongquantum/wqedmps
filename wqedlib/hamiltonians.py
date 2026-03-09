@@ -20,6 +20,7 @@ Hamiltonian: TypeAlias = np.ndarray | Callable[[int], np.ndarray]
 
 __all__ = [
     "hamiltonian_1tls",
+    "atom_waveguide_markov_hamiltonian_lr",
     "hamiltonian_1tls_feedback",
     "hamiltonian_2tls_mar",
     "hamiltonian_2tls_nmar",
@@ -92,6 +93,53 @@ def hamiltonian_1tls(
             + np.kron(sigmaminus(), np.eye(d_t_l * d_t_r))
         ) + delta_t * delta * np.kron(e(d_sys), np.eye(d_t_l * d_t_r))
         hm_total = hm_sys + t1 + t2
+    return hm_total
+
+
+def atom_waveguide_markov_hamiltonian_lr(
+    params: InputParams, omega: float | np.ndarray = 0, delta: float = 0
+) -> Hamiltonian:
+    """
+    Hamiltonian for 1 two-level system coupled to a bidirectional waveguide.
+
+    Same functionality as hamiltonian_1tls():
+    - scalar omega -> return ndarray
+    - array omega  -> return callable hm_total(t_k)
+    """
+    delta_t = params.delta_t
+    d_t_total = tuple(map(int, params.d_t_total))
+    d_sys_total = tuple(map(int, params.d_sys_total))
+    gamma_l = params.gamma_l
+    gamma_r = params.gamma_r
+
+    d_sys = int(np.prod(d_sys_total))
+    d_t = int(np.prod(d_t_total))
+
+    sm = sigma_minus()
+    sp = sigma_plus()
+    pe = proj_excited()
+
+    aL = a_l(d_t_total)
+    adagL = a_dag_l(d_t_total)
+    aR = a_r(d_t_total)
+    adagR = a_dag_r(d_t_total)
+
+    Ibin = np.eye(d_t, dtype=complex)
+
+    H_int_L = np.sqrt(gamma_l / delta_t) * (np.kron(sm, adagL) + np.kron(sp, aL))
+    H_int_R = np.sqrt(gamma_r / delta_t) * (np.kron(sm, adagR) + np.kron(sp, aR))
+
+    if isinstance(omega, np.ndarray):
+        omegas = np.asarray(omega, dtype=float)
+
+        def hm_total(t_k: int) -> np.ndarray:
+            H_atom = delta * pe + 0.5 * omegas[t_k] * (sp + sm)
+            return np.kron(H_atom, Ibin) + H_int_L + H_int_R
+
+    else:
+        H_atom = delta * pe + 0.5 * float(omega) * (sp + sm)
+        hm_total = np.kron(H_atom, Ibin) + H_int_L + H_int_R
+
     return hm_total
 
 

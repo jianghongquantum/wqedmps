@@ -43,9 +43,12 @@ __all__ = [
     "a",
     "a_dag",
     "a_l",
+    "num_op",
     "a_dag_l",
+    "num_op_l",
     "a_r",
     "a_dag_r",
+    "num_op_r",
     "delta_b_dag",
     "delta_b",
     "delta_b_dag_l",
@@ -91,41 +94,35 @@ def op_list_check(op_list: object) -> bool:
 
 # ============================================================
 # TLS local operators
+#
+# Basis convention:
+#     |g> = [1, 0]
+#     |e> = [0, 1]
+#
 # ============================================================
 
 
 def sigma_minus() -> np.ndarray:
     """
-    TLS lowering operator sigma^-.
+    TLS lowering operator σ⁻ = |g><e|
 
-    In the {|g>, |e>} basis:
-        sigma^- = |g><e|
+    Matrix form in {|g>,|e>} basis:
+        [[0, 1],
+         [0, 0]]
     """
     return np.array([[0.0, 1.0], [0.0, 0.0]], dtype=complex)
 
 
 def sigma_plus() -> np.ndarray:
     """
-    TLS raising operator sigma^+.
-
-    Basis convention:
-        |g> = [1, 0]
-        |e> = [0, 1]
-
-    Therefore:
-        sigma^+ = |e><g|
+    TLS raising operator σ⁺ = |e><g|
     """
     return sigma_minus().conj().T
 
 
 def proj_excited(d_sys: int = 2) -> np.ndarray:
     """
-    Excited-state projector.
-
-    For a 2-level system, this corresponds to |e><e|.
-
-    For higher-dimensional local Hilbert spaces, this function
-    still places the projector on basis state index 1.
+    Excited state projector |e><e|.
     """
     op = np.zeros((d_sys, d_sys), dtype=complex)
     op[1, 1] = 1.0
@@ -134,12 +131,11 @@ def proj_excited(d_sys: int = 2) -> np.ndarray:
 
 def tls_pop(d_sys: int = 2) -> np.ndarray:
     """
-    TLS population operator.
+    TLS population operator:
 
-    For a 2-level system:
-        n_TLS = sigma^+ sigma^- = |e><e|
+        n_TLS = σ⁺ σ⁻ = |e><e|
 
-    For a larger d_sys, fallback to e(d_sys).
+    For a 2-level system this equals proj_excited().
     """
     if d_sys == 2:
         return sigma_plus() @ sigma_minus()
@@ -147,50 +143,75 @@ def tls_pop(d_sys: int = 2) -> np.ndarray:
 
 
 # ============================================================
-# bosonic operators
+# Single bosonic mode operators
+#
+# Truncated bosonic Hilbert space of dimension d_t
+#
+# basis:
+#     |0>, |1>, |2>, ...
+#
 # ============================================================
+
+
 def a_dag(d_t: int = 2) -> np.ndarray:
     """
-    Discrete-bin creation operator a†.
+    Creation operator a† in truncated bosonic space.
 
-    In time-bin discretization, the continuous field operator is replaced by
-    a discrete operator carrying a factor sqrt(delta_t).
+    a† |n> = sqrt(n+1) |n+1>
     """
     return np.diag(np.sqrt(np.arange(1, d_t, dtype=float)), -1)
 
 
 def a(d_t: int = 2) -> np.ndarray:
     """
-    Discrete-bin annihilation operator a.
+    Annihilation operator a.
+
+    a |n> = sqrt(n) |n-1>
     """
     return np.diag(np.sqrt(np.arange(1, d_t, dtype=float)), 1)
 
 
-def a_dag_l(d_t_total: np.ndarray) -> np.ndarray:
+def num_op(d: int) -> np.ndarray:
     """
-    Left-channel creation operator embedded in the full two-channel bin space.
+    Bosonic number operator.
 
-    If d_t_total = [d_l, d_r], then the full bin Hilbert space is
-        H_bin = H_L ⊗ H_R
-    and this returns:
-        a_L† ⊗ I_R
+        n |k> = k |k>
     """
-    d_l, d_r = map(int, np.asarray(d_t_total, dtype=int)[:2])
-    return np.kron(a_dag(d_l), np.eye(d_r))
+    return np.diag(np.arange(d, dtype=float))
 
 
-def a_dag_r(d_t_total: np.ndarray) -> np.ndarray:
-    """
-    Right-channel creation operator embedded in the full two-channel bin space:
-        I_L ⊗ a_R†
-    """
-    d_l, d_r = map(int, np.asarray(d_t_total, dtype=int)[:2])
-    return np.kron(np.eye(d_l), a_dag(d_r))
+# ============================================================
+# Two-channel time-bin Hilbert space
+#
+# H_bin = H_L ⊗ H_R
+#
+# where
+#   H_L = left propagating mode
+#   H_R = right propagating mode
+#
+# np.kron ordering means the basis is:
+#
+#     |nL> ⊗ |nR>
+#
+# Example when d_l = d_r = 2:
+#
+# index   state
+# ----------------
+#   0     |0,0>
+#   1     |0,1>
+#   2     |1,0>
+#   3     |1,1>
+#
+# NOTE:
+# This ordering is important when interpreting observables.
+#
+# ============================================================
 
 
 def a_l(d_t_total: np.ndarray) -> np.ndarray:
     """
-    Left-channel annihilation operator embedded in the full two-channel bin space:
+    Left-channel annihilation operator.
+
         a_L ⊗ I_R
     """
     d_l, d_r = map(int, np.asarray(d_t_total, dtype=int)[:2])
@@ -199,11 +220,60 @@ def a_l(d_t_total: np.ndarray) -> np.ndarray:
 
 def a_r(d_t_total: np.ndarray) -> np.ndarray:
     """
-    Right-channel annihilation operator embedded in the full two-channel bin space:
+    Right-channel annihilation operator.
+
         I_L ⊗ a_R
     """
     d_l, d_r = map(int, np.asarray(d_t_total, dtype=int)[:2])
     return np.kron(np.eye(d_l), a(d_r))
+
+
+def a_dag_l(d_t_total: np.ndarray) -> np.ndarray:
+    """
+    Left-channel creation operator.
+
+        a_L† ⊗ I_R
+    """
+    d_l, d_r = map(int, np.asarray(d_t_total, dtype=int)[:2])
+    return np.kron(a_dag(d_l), np.eye(d_r))
+
+
+def a_dag_r(d_t_total: np.ndarray) -> np.ndarray:
+    """
+    Right-channel creation operator.
+
+        I_L ⊗ a_R†
+    """
+    d_l, d_r = map(int, np.asarray(d_t_total, dtype=int)[:2])
+    return np.kron(np.eye(d_l), a_dag(d_r))
+
+
+# ============================================================
+# Photon number operators in each propagation channel
+#
+# These measure the occupation in each waveguide direction.
+#
+# ============================================================
+
+
+def num_op_l(d_t_total: np.ndarray) -> np.ndarray:
+    """
+    Photon number operator in the left channel.
+
+        n_L ⊗ I_R
+    """
+    d_l, d_r = map(int, np.asarray(d_t_total, dtype=int)[:2])
+    return np.kron(num_op(d_l), np.eye(d_r))
+
+
+def num_op_r(d_t_total: np.ndarray) -> np.ndarray:
+    """
+    Photon number operator in the right channel.
+
+        I_L ⊗ n_R
+    """
+    d_l, d_r = map(int, np.asarray(d_t_total, dtype=int)[:2])
+    return np.kron(np.eye(d_l), num_op(d_r))
 
 
 # ============================================================
@@ -449,17 +519,17 @@ def swap(dim1: int, dim2: int) -> np.ndarray:
 # ============================================================
 
 
-def expectation_1bin(bin_state: np.ndarray, mpo: np.ndarray) -> complex:
+def expectation_1bin(bin_state: np.ndarray, op: np.ndarray) -> complex:
     """
-    Expectation value of a one-site operator with a single MPS tensor.
+    Expectation value of a one-site operator with a single local MPS tensor.
 
     bin_state shape:
         (bond_left, physical, bond_right)
 
-    mpo shape:
+    op shape:
         (physical, physical)
     """
-    return ncon([np.conj(bin_state), mpo, bin_state], [[1, 2, 4], [2, 3], [1, 3, 4]])
+    return np.einsum("aib,ij,ajb->", np.conj(bin_state), op, bin_state, optimize=True)
 
 
 def expectation_2bins(bin_state: np.ndarray, mpo: np.ndarray) -> complex:
@@ -510,27 +580,26 @@ expectation_nbins._bra = None
 
 def single_time_expectation(normalized_bins: list[np.ndarray], ops_list) -> np.ndarray:
     """
-    Compute expectation values of one or multiple single-bin operators
-    for a time-ordered list of normalized MPS tensors.
+    General Qwave-style expectation function.
 
     Parameters
     ----------
-    normalized_bins : list of ndarray
-        Typically bins.system_states or bins.output_field_states.
+    normalized_bins : list[np.ndarray]
+        Time-ordered local tensors, e.g.
+        bins.system_states or bins.output_field_states.
 
-    ops_list : operator or list of operators
-        Local operator(s) to evaluate.
+    ops_list : np.ndarray or list[np.ndarray]
+        One operator or a list of operators.
 
     Returns
     -------
-    ndarray
-        If a single operator is given:
+    np.ndarray
+        If one operator:
             shape (num_times,)
-        If multiple operators are given:
+        If list of operators:
             shape (num_ops, num_times)
     """
-    is_list = op_list_check(ops_list)
-
+    is_list = isinstance(ops_list, (list, tuple))
     if not is_list:
         ops_list = [ops_list]
 
@@ -538,9 +607,11 @@ def single_time_expectation(normalized_bins: list[np.ndarray], ops_list) -> np.n
         [
             [expectation_1bin(bin_state, op) for bin_state in normalized_bins]
             for op in ops_list
-        ]
+        ],
+        dtype=complex,
     )
 
+    out = np.real_if_close(out)
     return out if is_list else out[0]
 
 

@@ -13,6 +13,8 @@ It requires the module ncon (pip install --user ncon)
 
 """
 
+from dataclasses import dataclass
+from scipy.linalg import expm
 import numpy as np
 import copy
 from ncon import ncon
@@ -24,12 +26,36 @@ from typing import Callable, TypeAlias
 from wqedlib.hamiltonians import Hamiltonian
 from wqedlib.operators import *
 from wqedlib.operators import u_evol, swap
+from seemps.state import CanonicalMPS, product_state, DEFAULT_STRATEGY
 
-__all__ = ["t_evol_mar", "t_evol_nmar"]
+__all__ = ["t_evol_mar", "t_evol_nmar", "t_evol_mar_seemps_lr"]
 
 # -----------------------------------
 # Singular Value Decomposition helper
 # -----------------------------------
+# ============================================================
+# Output container
+# ============================================================
+
+
+@dataclass
+class BinsSeemps:
+    """
+    Hybrid bins container:
+    - system_states: Qwave-style local atom tensors
+    - output_field_states: Qwave-style local output-bin tensors
+    - mps_states: full MPS snapshots (optional but useful)
+    - schmidt: singular values after each interaction step
+    - times: time array, length n_steps + 1
+    - psi_final: final full MPS
+    """
+
+    system_states: list[np.ndarray]
+    output_field_states: list[np.ndarray]
+    mps_states: list[CanonicalMPS]
+    schmidt: list[np.ndarray]
+    times: np.ndarray
+    psi_final: CanonicalMPS
 
 
 def _svd_tensors(tensor: np.ndarray, bond_max: int, d_1: int, d_2: int) -> np.ndarray:
@@ -72,6 +98,193 @@ def _svd_tensors(tensor: np.ndarray, bond_max: int, d_1: int, d_2: int) -> np.nd
     u = u[:, :chi].reshape(tensor.shape[0], d_1, chi)
     vt = vt[:chi, :].reshape(chi, d_2, tensor.shape[-1])
     return u, s_norm, vt
+
+
+# ============================================================
+# Basic tensor-network helpers
+# ============================================================
+
+
+def local_gate_from_hamiltonian(
+    H: np.ndarray,
+    delta_t: float,
+    d_sys_total: np.ndarray | int,
+    d_t_total: np.ndarray | int,
+    interacting_timebins_num: int = 1,
+) -> np.ndarray:
+    """
+    Generalized evolution gate:
+        U = exp(-i H delta_t)
+
+    For interacting_timebins_num = 1, output shape is
+        (d_sys, d_t, d_sys, d_t)
+
+    For more interacting bins, output shape is
+        (d_t, ..., d_t, d_sys, d_t, d_t, ..., d_t, d_sys, d_t)
+    according to the chosen convention.
+    """
+    d_sys = int(np.prod(d_sys_total))
+    d_t = int(np.prod(d_t_total))
+
+    shape = (((d_t,) * (interacting_timebins_num - 1)) + (d_sys,) + (d_t,)) * 2
+    return expm(-1j * H * delta_t).reshape(shape)
+
+
+def swap_gate(d1: int, d2: int) -> np.ndarray:
+    """
+    Two-site SWAP gate as rank-4 tensor:
+        S[out1, out2, in1, in2]
+    """
+    S = np.zeros((d2, d1, d1, d2), dtype=complex)
+    for i in range(d1):
+        for j in range(d2):
+            S[j, i, i, j] = 1.0
+    return S
+
+
+def _set_bond_limit(strategy, bond_max: int):
+    """
+    Handle possible seemps version differences.
+    """
+    for key in ("max_bond_dimension", "max_bond", "chi_max", "bond_max"):
+        try:
+            return strategy.replace(**{key: bond_max})
+        except Exception:
+            pass
+    return strategy
+
+
+def make_product_mps(i_s0: np.ndarray, i_n0: np.ndarray, n_steps: int) -> CanonicalMPS:
+    """
+    Initial chain order:
+        [system, bin0, bin1, ..., bin_{n_steps-1}]
+    """
+    sites = [np.asarray(i_s0, complex)]
+    sites.extend(np.asarray(i_n0, complex) for _ in range(n_steps))
+    return CanonicalMPS(product_state(sites), center=0, normalize=True)
+
+
+def merge_two_sites(psi: CanonicalMPS, site: int) -> np.ndarray:
+    """
+    Merge psi[site] and psi[site+1] into:
+        theta[a, i, j, b]
+    """
+    return np.tensordot(psi[site], psi[site + 1], axes=(2, 0))
+
+
+def apply_two_site_gate(theta: np.ndarray, gate: np.ndarray) -> np.ndarray:
+    """
+    gate[p,q,i,j] acting on theta[a,i,j,b] -> theta'[a,p,q,b]
+    """
+    return np.einsum("pqij,aijb->apqb", gate, theta, optimize=True)
+
+
+def schmidt_values(theta: np.ndarray, chi_max: int | None = None) -> np.ndarray:
+    """
+    Singular values across the bond of theta[a,i,j,b].
+    """
+    chiL, d1, d2, chiR = theta.shape
+    s = np.linalg.svd(theta.reshape(chiL * d1, d2 * chiR), compute_uv=False)
+    return s[:chi_max] if chi_max is not None else s
+
+
+def copy_mps(psi: CanonicalMPS) -> CanonicalMPS:
+    """
+    Safe MPS snapshot.
+    """
+    try:
+        return copy.deepcopy(psi)
+    except Exception:
+        return CanonicalMPS(psi, center=getattr(psi, "center", 0), normalize=False)
+
+
+# ============================================================
+# Main evolution
+# ============================================================
+def t_evol_mar_seemps_lr(
+    ham: Hamiltonian,
+    i_s0: np.ndarray,
+    i_n0: np.ndarray,
+    params: InputParams,
+    store_mps: bool = True,
+) -> BinsSeemps:
+    """
+    Markovian time-bin evolution for one TLS coupled to a bidirectional waveguide.
+
+    Chain:
+        [system, bin0, bin1, ..., bin_{n_steps-1}]
+
+    At step k:
+        1) apply local atom-bin gate on sites (k, k+1)
+        2) split/truncate with update_2site_right(...)
+        3) apply SWAP on the same pair
+        4) after SWAP:
+             site k   = emitted output bin
+             site k+1 = atom
+
+    Returns
+    -------
+    BinsSeemps
+        Contains Qwave-style local tensors + optional full MPS snapshots.
+    """
+    delta_t = params.delta_t
+    n_steps = int(round(params.tmax / delta_t))
+    d_sys = int(np.prod(params.d_sys_total))
+    d_t = int(np.prod(params.d_t_total))
+
+    i_s0 = np.asarray(i_s0, complex).reshape(-1)
+    i_n0 = np.asarray(i_n0, complex).reshape(-1)
+
+    if i_s0.size != d_sys:
+        raise ValueError(f"d_sys={d_sys}, but len(i_s0)={i_s0.size}")
+    if i_n0.size != d_t:
+        raise ValueError(f"d_t={d_t}, but len(i_n0)={i_n0.size}")
+
+    psi = make_product_mps(i_s0, i_n0, n_steps)
+
+    strategy = DEFAULT_STRATEGY.replace(tolerance=getattr(params, "atol", 1e-12))
+    strategy = _set_bond_limit(strategy, params.bond_max)
+
+    SWAP = swap_gate(d_sys, d_t)
+
+    system_states: list[np.ndarray] = []
+    output_field_states: list[np.ndarray] = []
+    mps_states: list[CanonicalMPS] = []
+    schmidt: list[np.ndarray] = [np.array([1.0])]
+    times = np.arange(n_steps + 1) * delta_t
+
+    for k in range(n_steps):
+        Hk = ham(k) if callable(ham) else ham
+        U = local_gate_from_hamiltonian(Hk, delta_t, d_sys, d_t)
+
+        # 1) atom-bin interaction
+        theta = merge_two_sites(psi, k)
+        theta = apply_two_site_gate(theta, U)
+        schmidt.append(schmidt_values(theta, chi_max=params.bond_max))
+        psi.update_2site_right(theta, k, strategy)
+
+        # 2) swap atom with current output bin
+        theta = merge_two_sites(psi, k)
+        theta = apply_two_site_gate(theta, SWAP)
+        psi.update_2site_right(theta, k, strategy)
+
+        # After SWAP:
+        #   psi[k]   -> output bin tensor
+        #   psi[k+1] -> atom tensor
+        output_field_states.append(np.array(psi[k], copy=True))
+        system_states.append(np.array(psi[k + 1], copy=True))
+
+        if store_mps:
+            mps_states.append(copy_mps(psi))
+
+    return BinsSeemps(
+        system_states=system_states,
+        output_field_states=output_field_states,
+        mps_states=mps_states,
+        schmidt=schmidt,
+        times=times,
+        psi_final=psi,
+    )
 
 
 # ------------------------------------------------------
