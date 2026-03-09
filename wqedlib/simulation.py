@@ -57,48 +57,6 @@ class BinsSeemps:
     psi_final: CanonicalMPS
 
 
-def _svd_tensors(tensor: np.ndarray, bond_max: int, d_1: int, d_2: int) -> np.ndarray:
-    """
-    Perform a SVD, reshape the tensors and return left tensor,
-    normalized Schmidt vector, and right tensor.
-
-    Parameters
-    ----------
-    tensor : ndarray
-        tensor to decompose
-
-    bond_max : int
-        max. bond dimension
-
-    d_1 : int
-        physical dimension of first tensor
-
-    d_2 : int
-        physical dimension of second tensor
-
-    Returns
-    -------
-    u : ndarray
-        left normalized tensor
-
-    s_norm : ndarray
-        smichdt coefficients normalized
-
-    vt : ndarray
-        transposed right normalized tensor
-    """
-    u, s, vt = svd(
-        tensor.reshape(tensor.shape[0] * d_1, tensor.shape[-1] * d_2),
-        full_matrices=False,
-    )
-    chi = min(bond_max, len(s))
-    epsilon = 1e-12  # to avoid dividing by zero
-    s_norm = s[:chi] / (norm(s[:chi]) + epsilon)
-    u = u[:, :chi].reshape(tensor.shape[0], d_1, chi)
-    vt = vt[:chi, :].reshape(chi, d_2, tensor.shape[-1])
-    return u, s_norm, vt
-
-
 # ============================================================
 # Basic tensor-network helpers
 # ============================================================
@@ -289,275 +247,419 @@ def t_evol_mar_seemps_lr(
 # Time evolution: Markovian and non-Markovian evolutions
 # ------------------------------------------------------
 
+from dataclasses import dataclass
+import numpy as np
+import copy
+from typing import Callable
+from seemps.state import CanonicalMPS, product_state, DEFAULT_STRATEGY
 
-def t_evol_mar(
-    ham: Hamiltonian, i_s0: np.ndarray, i_n0: np.ndarray, params: InputParams
-) -> tuple[list[np.ndarray], list[np.ndarray]]:
+from wqedlib import states as states
+from wqedlib.parameters import InputParams
+from wqedlib.hamiltonians import Hamiltonian
+from wqedlib.operators import u_evol, swap_gate
+
+
+# ============================================================
+# Output container: non-Markovian seemps version
+# ============================================================
+
+
+@dataclass
+class BinsSeempsNmar:
     """
-    Time evolution of the system without delay times (Markovian regime)
+    Non-Markovian bins container in seemps style.
 
-    Parameters
-    ----------
-    ham : ndarray or callable
-        Either a fixed evolution operator/tensor or a callable returning the
-        evolution operator for time-step k: ham(k).
+    Conventions
+    -----------
+    times[k] = k * delta_t
 
-    i_s0 : ndarray
-        Initial system bin (tensor).
+    Stored local states:
+    - system_states[k]       : system local tensor at time t_k
+    - input_field_states[k]  : input-bin tensor associated with time t_k
+    - output_field_states[k] : emitted/output-bin tensor associated with time t_k
+    - loop_field_states[k]   : loop/feedback-bin tensor associated with time t_k
 
-    i_n0: ndarray
-        Initial field bin.
-        Seed for the input time-bin generator.
+    Notes
+    -----
+    - index 0 stores the initial local states at t=0
+    - mps_states[k] is the full MPS snapshot at time t_k, if requested
+    """
 
-    params : InputParams
-        Class containing the input parameters
-        (contains delta_t, tmax, bond, d_t_total, d_sys_total).
+    system_states: list[np.ndarray]
+    input_field_states: list[np.ndarray]
+    output_field_states: list[np.ndarray]
+    loop_field_states: list[np.ndarray]
+    correlation_bins: list[np.ndarray]
+    mps_states: list[CanonicalMPS]
+    schmidt: list[np.ndarray]
+    schmidt_tau: list[np.ndarray]
+    times: np.ndarray
+    psi_final: CanonicalMPS
+
+
+# ============================================================
+# Helpers already in your file:
+#   _set_bond_limit
+#   copy_mps
+#   merge_two_sites
+#   apply_two_site_gate
+#   schmidt_values
+# ============================================================
+
+
+def _vacuum_bin_state(d_t: int) -> np.ndarray:
+    """Vacuum bin state as plain vector."""
+    return states.wg_ground(d_t)
+
+
+def _build_input_bin_list(
+    d_t_total: np.ndarray, i_n0, n_steps: int
+) -> list[np.ndarray]:
+    """
+    Materialize the input field generator into a list of local bin state vectors.
+
+    This mirrors the old code:
+        input_field = states.input_state_generator(d_t_total, i_n0)
+        i_nk = next(input_field)
+
+    so that the seemps chain can be initialized with all future bins.
+    """
+    gen = states.input_state_generator(d_t_total, i_n0)
+    out = []
+    for _ in range(n_steps):
+        x = next(gen)
+        x = np.asarray(x, dtype=complex).reshape(-1)
+        out.append(x)
+    return out
+
+
+def make_product_mps_nmar(
+    i_s0: np.ndarray,
+    i_n0,
+    n_steps: int,
+    l_delay: int,
+    d_t_total: np.ndarray,
+) -> CanonicalMPS:
+    """
+    Initial chain order for the non-Markovian delay-line problem:
+
+        [tau_0, tau_1, ..., tau_{l-1}, system, in_0, in_1, ..., in_{n_steps-1}]
+
+    where all tau bins start in vacuum.
+    """
+    i_s0 = np.asarray(i_s0, dtype=complex).reshape(-1)
+    input_bins = _build_input_bin_list(d_t_total, i_n0, n_steps)
+
+    d_t = int(np.prod(d_t_total))
+    vac = _vacuum_bin_state(d_t)
+
+    sites = [vac.copy() for _ in range(l_delay)]
+    sites.append(i_s0)
+    sites.extend(input_bins)
+
+    return CanonicalMPS(product_state(sites), center=l_delay, normalize=True)
+
+
+def merge_three_sites(psi: CanonicalMPS, site: int) -> np.ndarray:
+    """
+    Merge psi[site], psi[site+1], psi[site+2] into:
+
+        theta[a, i, j, k, b]
+
+    with shapes:
+        psi[site]   : (Dl, d1, D1)
+        psi[site+1] : (D1, d2, D2)
+        psi[site+2] : (D2, d3, Dr)
+
+    output:
+        theta       : (Dl, d1, d2, d3, Dr)
+    """
+    A = np.asarray(psi[site], dtype=complex)
+    B = np.asarray(psi[site + 1], dtype=complex)
+    C = np.asarray(psi[site + 2], dtype=complex)
+
+    tmp = np.tensordot(A, B, axes=(2, 0))  # (Dl, d1, d2, D2)
+    out = np.tensordot(tmp, C, axes=(3, 0))  # (Dl, d1, d2, d3, Dr)
+    return out
+
+
+def apply_three_site_gate(theta: np.ndarray, gate: np.ndarray) -> np.ndarray:
+    """
+    gate[p, q, r, i, j, k] acting on theta[a, i, j, k, b]
+    gives theta'[a, p, q, r, b]
+    """
+    return np.einsum("pqrijk,aijkb->apqrb", gate, theta, optimize=True)
+
+
+def _truncate_from_singular_values(s: np.ndarray, bond_max: int, atol: float) -> int:
+    """
+    Choose chi from singular values using a mixed strategy:
+    - never exceed bond_max
+    - drop tails below atol in Schmidt weight
+    """
+    if s.size == 0:
+        return 0
+
+    chi = min(len(s), bond_max)
+
+    # try to shrink chi using discarded weight threshold
+    s2 = np.abs(s) ** 2
+    while chi > 1 and np.sum(s2[chi - 1 :]) < atol:
+        chi -= 1
+
+    return max(1, chi)
+
+
+def split_three_sites_right(
+    theta: np.ndarray,
+    bond_max: int,
+    atol: float = 1e-12,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Split theta[a, i, j, k, b] into three MPS tensors using two SVDs.
 
     Returns
     -------
-    results : Bins (from parameters.py)
-        containing:
-            - sys_b: list of system bins
-            - time_b: list of time bins
-            - cor_b: list of tensors used for correlations
-            - schmidt: list of Schmidt coefficient arrays (for entanglement calculation)
-    """
+    A1, A2, A3, s_left, s_right
 
+    where:
+      A1 shape = (Dl, d1, chi1)
+      A2 shape = (chi1, d2, chi2)
+      A3 shape = (chi2, d3, Dr)
+
+    and
+      s_left  are singular values across the cut (site | site+1,site+2)
+      s_right are singular values across the cut (site,site+1 | site+2)
+    """
+    Dl, d1, d2, d3, Dr = theta.shape
+
+    # --------------------------------------------------------
+    # First split: (Dl*d1) | (d2*d3*Dr)
+    # --------------------------------------------------------
+    M1 = theta.reshape(Dl * d1, d2 * d3 * Dr)
+    U1, s1, Vh1 = np.linalg.svd(M1, full_matrices=False)
+
+    chi1 = _truncate_from_singular_values(s1, bond_max, atol)
+    U1 = U1[:, :chi1]
+    s1 = s1[:chi1]
+    Vh1 = Vh1[:chi1, :]
+
+    A1 = U1.reshape(Dl, d1, chi1)
+    rest = (s1[:, None] * Vh1).reshape(chi1, d2, d3, Dr)
+
+    # --------------------------------------------------------
+    # Second split: (chi1*d2) | (d3*Dr)
+    # --------------------------------------------------------
+    M2 = rest.reshape(chi1 * d2, d3 * Dr)
+    U2, s2, Vh2 = np.linalg.svd(M2, full_matrices=False)
+
+    chi2 = _truncate_from_singular_values(s2, bond_max, atol)
+    U2 = U2[:, :chi2]
+    s2 = s2[:chi2]
+    Vh2 = Vh2[:chi2, :]
+
+    A2 = U2.reshape(chi1, d2, chi2)
+    A3 = (s2[:, None] * Vh2).reshape(chi2, d3, Dr)
+
+    return A1, A2, A3, s1, s2
+
+
+def _store_local_state(psi: CanonicalMPS, site: int) -> np.ndarray:
+    """
+    Return a copy of the local tensor at a chosen canonical center.
+    """
+    psi_loc = CanonicalMPS(psi, center=site, normalize=False)
+    return np.array(psi_loc[site], copy=True)
+
+
+# ============================================================
+# Main non-Markovian evolution in seemps style
+# ============================================================
+
+
+def t_evol_nmar_seemps_lr(
+    ham: Hamiltonian,
+    i_s0: np.ndarray,
+    i_n0,
+    params: InputParams,
+    store_mps: bool = True,
+) -> BinsSeempsNmar:
+    """
+    Non-Markovian time-bin evolution with finite delay / feedback, in seemps style.
+
+    Chain convention at t=0
+    -----------------------
+        [tau_0, tau_1, ..., tau_{l-1}, system, in_0, in_1, ..., in_{n_steps-1}]
+
+    where:
+      - l = round(tau / delta_t)
+      - system initially sits at site l
+      - current feedback bin at step k starts at site k
+      - current input bin at step k starts at site l + k + 1
+
+    Each step k performs:
+      1) swap current feedback bin rightwards until it is adjacent to the system
+      2) apply 3-site gate on [feedback, system, input]
+      3) swap system with the current output bin, so system moves one site right
+      4) swap feedback bin back left so the delay-line structure is restored
+      5) store local normalized system/bin tensors
+
+    Notes
+    -----
+    This is the non-Markovian analogue of your new Markov seemps code.
+
+    It assumes:
+      - u_evol(H, d_sys, d_t, 2) returns a 6-index gate ordered as
+            U[out_tau, out_sys, out_in, in_tau, in_sys, in_in]
+      - CanonicalMPS supports item assignment: psi[i] = tensor
+
+    If your local seemps version does not support item assignment, tell me and
+    I will rewrite the local 3-site update in a different form.
+    """
     delta_t = params.delta_t
     tmax = params.tmax
-    bond = params.bond_max
-    d_t_total = params.d_t_total
-    d_sys_total = params.d_sys_total
+    tau = params.tau
+    n_steps = int(round(tmax / delta_t))
+    l_delay = int(round(tau / delta_t))
 
-    d_t = np.prod(d_t_total)
-    d_sys = np.prod(d_sys_total)
-    n = int(tmax / delta_t)
-    t_k = 0
-    i_s = i_s0
+    d_sys = int(np.prod(params.d_sys_total))
+    d_t = int(np.prod(params.d_t_total))
 
-    # Prepare for results and store initial states
-    sbins = []
-    sbins.append(i_s0)
-    tbins = []
-    tbins.append(states.wg_ground(d_t))
-    schmidt = []
-    schmidt.append(np.zeros(1))
-    tbins_in = []
-    tbins_in.append(states.wg_ground(d_t))
-    if not callable(ham):
-        evol = u_evol(ham, d_sys, d_t)
-    swap_sys_t = swap(d_sys, d_t)
-    input_field = states.input_state_generator(d_t_total, i_n0)
-    cor_list = []
+    if l_delay < 1:
+        raise ValueError("For non-Markovian evolution, require tau >= delta_t.")
 
-    # Time Evolution loop
-    for k in range(n):
-        i_nk = next(input_field)
-        if callable(ham):
-            evol = u_evol(ham(k), d_sys, d_t)
+    i_s0 = np.asarray(i_s0, dtype=complex).reshape(-1)
 
-        # Put OC in input bin to calculate input field observables
-        phi1 = ncon([i_s, i_nk], [[-1, -2, 1], [1, -3, -4]])
-        i_s, stemp, i_nk = _svd_tensors(phi1, bond, d_sys, d_t)
-        i_nk = stemp[:, None, None] * i_nk  # OC in input bin
-        tbins_in.append(i_nk)
+    if i_s0.size != d_sys:
+        raise ValueError(f"d_sys={d_sys}, but len(i_s0)={i_s0.size}")
 
-        # Time evolution
-        phi1 = ncon(
-            [i_s, i_nk, evol], [[-1, 2, 3], [3, 4, -4], [-2, -3, 2, 4]]
-        )  # system bin, time bin + u operator contraction
-        i_s, stemp, i_n = _svd_tensors(phi1, bond, d_sys, d_t)
-        i_s = i_s * stemp[None, None, :]  # OC system bin
-        sbins.append(i_s)
-        tbins.append(stemp[:, None, None] * i_n)
-
-        # Swap system bin to right of time bin
-        phi2 = ncon(
-            [i_s, i_n, swap_sys_t], [[-1, 5, 2], [2, 6, -4], [-2, -3, 5, 6]]
-        )  # system bin, time bin + swap contraction
-        i_n, stemp, i_st = _svd_tensors(phi2, bond, d_t, d_sys)
-        i_s = stemp[:, None, None] * i_st  # OC system bin
-        t_k += delta_t
-
-        schmidt.append(stemp)
-        cor_list.append(i_n)
-
-    # Overwrite last entry with the OC
-    cor_list[-1] = i_n * stemp[None, None, :]
-
-    return Bins(
-        system_states=sbins,
-        output_field_states=tbins,
-        input_field_states=tbins_in,
-        correlation_bins=cor_list,
-        schmidt=schmidt,
+    # --------------------------------------------------------
+    # Build full product MPS:
+    #   [delay bins][system][future input bins]
+    # --------------------------------------------------------
+    psi = make_product_mps_nmar(
+        i_s0=i_s0,
+        i_n0=i_n0,
+        n_steps=n_steps,
+        l_delay=l_delay,
+        d_t_total=params.d_t_total,
     )
 
+    strategy = DEFAULT_STRATEGY.replace(tolerance=getattr(params, "atol", 1e-12))
+    strategy = _set_bond_limit(strategy, params.bond_max)
 
-def t_evol_nmar(
-    ham: Hamiltonian, i_s0: np.ndarray, i_n0: np.ndarray, params: InputParams
-) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
-    """
-    Time evolution of the system with finite delays/feedback (non-Markovian regime).
-    Requires tau to be at least delta_t.
+    atol = getattr(params, "atol", 1e-12)
 
-    Parameters
-    ----------
-    ham : ndarray/callable
-        Either a fixed evolution operator/tensor or a callable returning the
-        evolution operator for time-step k: ham(k).
+    SWAP_TT = swap_gate(d_t, d_t)
+    SWAP_ST = swap_gate(d_sys, d_t)
 
-     i_s0 : ndarray
-         Initial system bin (tensor).
+    times = np.arange(n_steps + 1, dtype=float) * delta_t
 
-     i_n0: ndarray
-         Initial field bin.
-         Seed for the input time-bin generator.
+    # --------------------------------------------------------
+    # Storage at t = 0
+    # --------------------------------------------------------
+    system_states: list[np.ndarray] = [_store_local_state(psi, l_delay)]
+    input_field_states: list[np.ndarray] = [_store_local_state(psi, l_delay + 1)]
+    output_field_states: list[np.ndarray] = [_vacuum_bin_state(d_t)[None, :, None]]
+    loop_field_states: list[np.ndarray] = [_store_local_state(psi, l_delay - 1)]
+    correlation_bins: list[np.ndarray] = [_store_local_state(psi, l_delay - 1)]
 
-     params : InputParams
-        Class containing the input parameters
-        (contains delta_t, tmax, bond, d_t_total, d_sys_total, tau.).
+    mps_states: list[CanonicalMPS] = [copy_mps(psi)] if store_mps else []
+    schmidt: list[np.ndarray] = [np.array([1.0])]
+    schmidt_tau: list[np.ndarray] = [np.array([1.0])]
 
-    Returns
-    -------
-    Bins:  Dataclass (from parameters.py)
-        containing:
-          - sys_b: list of system bins
-          - time_b: list of time bins
-          - tau_b: list of feedback bins
-          - cor_b: list of tensors used for correlations
-          - schmidt, schmidt_tau: lists of Schmidt coefficient arrays
-    """
-    delta_t = params.delta_t
-    tmax = params.tmax
-    bond = params.bond_max
-    d_t_total = params.d_t_total
-    d_sys_total = params.d_sys_total
-    tau = params.tau
+    # --------------------------------------------------------
+    # Main time loop
+    # --------------------------------------------------------
+    for k in range(n_steps):
+        sys_site = l_delay + k
+        fb_site = k
+        in_site = sys_site + 1
 
-    d_t = np.prod(d_t_total)
-    d_sys = np.prod(d_sys_total)
+        # ----------------------------------------------------
+        # 1) Bring current feedback bin next to the system
+        #    Move fb_site -> sys_site - 1 using bin-bin swaps
+        # ----------------------------------------------------
+        for s in range(fb_site, sys_site - 1):
+            theta = merge_two_sites(psi, s)
+            theta = apply_two_site_gate(theta, SWAP_TT)
+            psi.update_2site_right(theta, s, strategy)
 
-    # Lists for storing results
-    sbins = []
-    tbins = []
-    tbins_in = []
-    taubins = []
-    nbins = []
-    cor_list = []
-    schmidt = []
-    schmidt_tau = []
-    sbins.append(i_s0)
-    tbins.append(states.wg_ground(d_t))
-    tbins_in.append(states.wg_ground(d_t))
-    taubins.append(states.wg_ground(d_t))
-    schmidt.append(np.zeros(1))
-    schmidt_tau.append(np.zeros(1))
+        # feedback is now at site sys_site - 1
 
-    input_field = states.input_state_generator(d_t_total, i_n0)
-    n = int(round(tmax / delta_t, 0))
-    t_k = 0
-    t_0 = 0
-    if not callable(ham):
-        evol = u_evol(
-            ham, d_sys, d_t, 2
-        )  # Feedback loop means time evolution involves an input and a feedback time bin. Can generalize this later, leaving 2 for now so it runs.
-    swap_t_t = swap(d_t, d_t)
-    swap_sys_t = swap(d_sys, d_t)
-    l = int(round(tau / delta_t, 0))  # time steps between system and feedback
+        # ----------------------------------------------------
+        # Store input bin just before interaction
+        # ----------------------------------------------------
+        input_field_states.append(_store_local_state(psi, in_site))
 
-    # Fill the feedback loop with vacuum bins
-    for i in range(l):
-        nbins.append(states.wg_ground(d_t))
-        t_0 += delta_t
+        # ----------------------------------------------------
+        # 2) Three-site interaction on [feedback, system, input]
+        # ----------------------------------------------------
+        Hk = ham(k) if callable(ham) else ham
+        U3 = u_evol(Hk, d_sys, d_t, 2)
 
-    i_stemp = i_s0
+        theta3 = merge_three_sites(psi, sys_site - 1)
+        theta3 = apply_three_site_gate(theta3, U3)
 
-    # Simulation loop for time evolution
-    for k in range(n):
-        # swap of the feedback until being next to the system
-        i_tau = nbins[k]  # starting from the feedback bin
-        for i in range(k, k + l - 1):
-            i_n = nbins[i + 1]
-            swaps = ncon(
-                [i_tau, i_n, swap_t_t], [[-1, 5, 2], [2, 6, -4], [-2, -3, 5, 6]]
-            )
-            i_n2, stemp, i_t = _svd_tensors(swaps, bond, d_t, d_t)
-            i_tau = ncon([np.diag(stemp), i_t], [[-1, 1], [1, -3, -4]])
-            nbins[i] = i_n2
+        A1, A2, A3, s_tau, s_sys = split_three_sites_right(
+            theta3,
+            bond_max=params.bond_max,
+            atol=atol,
+        )
 
-        # Make the system bin the OC
-        i_1 = ncon(
-            [i_tau, i_stemp], [[-1, -2, 1], [1, -3, -4]]
-        )  # feedback-system contraction
-        i_t, stemp, i_stemp = _svd_tensors(i_1, bond, d_t, d_sys)
-        i_s = stemp[:, None, None] * i_stemp  # OC system bin
+        # write back tensors:
+        #   site sys_site-1 -> updated feedback bin
+        #   site sys_site   -> updated system
+        #   site sys_site+1 -> current output bin before swap
+        psi[sys_site - 1] = A1
+        psi[sys_site] = A2
+        psi[in_site] = A3
 
-        i_nk = next(input_field)
-        if callable(ham):
-            evol = u_evol(ham(k), d_sys, d_t, 2)
+        schmidt_tau.append(s_tau)
+        schmidt.append(s_sys)
 
-        # Put OC in input bin to calculate input field observables
-        phi1 = ncon([i_s, i_nk], [[-1, -2, 1], [1, -3, -4]])
-        i_s, stemp, i_nk = _svd_tensors(phi1, bond, d_sys, d_t)
-        i_nk = stemp[:, None, None] * i_nk  # OC in input bin
-        tbins_in.append(i_nk)
+        # ----------------------------------------------------
+        # 3) Swap system with the current output bin
+        #    sites: [sys_site, sys_site+1]
+        # ----------------------------------------------------
+        theta = merge_two_sites(psi, sys_site)
+        theta = apply_two_site_gate(theta, SWAP_ST)
+        psi.update_2site_right(theta, sys_site, strategy)
 
-        # now contract the 3 bins and apply u, followed by 2 svd to recover the 3 bins
-        phi1 = ncon(
-            [i_t, i_s, i_nk, evol],
-            [[-1, 3, 1], [1, 4, 2], [2, 5, -5], [-2, -3, -4, 3, 4, 5]],
-        )  # tau bin, system bin, future time bin + u operator contraction
-        i_t, stemp, i_2 = _svd_tensors(phi1, bond, d_t, d_t * d_sys)
-        i_2 = stemp[:, None, None] * i_2
-        i_stemp, stemp, i_n = _svd_tensors(i_2, bond, d_sys, d_t)
-        i_s = i_stemp * stemp[None, None, :]
-        sbins.append(i_s)
+        # After this:
+        #   site sys_site   -> emitted/output bin of this step
+        #   site sys_site+1 -> system for next time
+        system_states.append(_store_local_state(psi, sys_site + 1))
+        output_field_states.append(_store_local_state(psi, sys_site))
 
-        # swap system and i_n
-        phi2 = ncon(
-            [i_s, i_n, swap_sys_t], [[-1, 3, 2], [2, 4, -4], [-2, -3, 3, 4]]
-        )  # system bin, time bin + swap contraction
-        i_n, stemp, i_stemp = _svd_tensors(phi2, bond, d_t, d_sys)
-        i_n = i_n * stemp[None, None, :]  # the OC in time bin
+        # ----------------------------------------------------
+        # 4) Move the updated feedback bin back left so that at the
+        #    next step the current feedback bin will be at site k+1
+        #
+        #    current feedback is at site sys_site - 1 = l_delay + k - 1
+        #    target site for next step is k + 1
+        # ----------------------------------------------------
+        for s in range(sys_site - 2, k, -1):
+            theta = merge_two_sites(psi, s)
+            theta = apply_two_site_gate(theta, SWAP_TT)
+            psi.update_2site_right(theta, s, strategy)
 
-        cont = ncon([i_t, i_n], [[-1, -2, 1], [1, -3, -4]])
-        i_t, stemp, i_n = _svd_tensors(cont, bond, d_t, d_t)
-        i_tau = i_t * stemp[None, None, :]  # OC in feedback bin
-        tbins.append(stemp[:, None, None] * i_n)
+        # feedback bin now sits at site k+1
+        loop_field_states.append(_store_local_state(psi, k + 1))
+        correlation_bins.append(_store_local_state(psi, k + 1))
 
-        # feedback bin, time bin contraction
-        taubins.append(i_tau)
-        nbins[k + l - 1] = i_tau  # update of the feedback bin
-        nbins.append(i_n)
-        t_k += delta_t
-        schmidt.append(
-            stemp
-        )  # storing the Schmidt coeff for calculating the entanglement
+        if store_mps:
+            mps_states.append(copy_mps(psi))
 
-        # swap back of the feedback bin
-        for i in range(k + l - 1, k, -1):  # goes from the last time bin to first one
-            i_n = nbins[i - 1]  # time bin
-            swaps = ncon(
-                [i_n, i_tau, swap_t_t], [[-1, 5, 2], [2, 6, -4], [-2, -3, 5, 6]]
-            )  # time bin, feedback bin + swap contraction
-            i_t, stemp, i_n2 = _svd_tensors(swaps, bond, d_t, d_t)
-            i_tau = i_t * stemp[None, None, :]  # OC tau bin
-            nbins[i] = i_n2  # update nbins
-        schmidt_tau.append(stemp)
-
-        nbins[k + 1] = stemp[:, None, None] * i_n2  # new tau bin for the next time step
-        cor_list.append(i_t)
-
-    # Rewrite the last result time bin with the OC in it
-    cor_list[-1] = i_t * stemp[None, None, :]
-
-    return Bins(
-        system_states=sbins,
-        loop_field_states=tbins,
-        output_field_states=taubins,
-        input_field_states=tbins_in,
-        correlation_bins=cor_list,
+    return BinsSeempsNmar(
+        system_states=system_states,
+        input_field_states=input_field_states,
+        output_field_states=output_field_states,
+        loop_field_states=loop_field_states,
+        correlation_bins=correlation_bins,
+        mps_states=mps_states,
         schmidt=schmidt,
         schmidt_tau=schmidt_tau,
+        times=times,
+        psi_final=psi,
     )

@@ -291,8 +291,6 @@ def u_evol(
 # ============================================================
 # Swap tensor
 # ============================================================
-
-
 def swap_gate(d1: int, d2: int) -> np.ndarray:
     """
     Two-site SWAP gate as rank-4 tensor:
@@ -371,8 +369,6 @@ expectation_nbins._bra = None
 
 def single_time_expectation(normalized_bins: list[np.ndarray], ops_list) -> np.ndarray:
     """
-    General Qwave-style expectation function.
-
     Parameters
     ----------
     normalized_bins : list[np.ndarray]
