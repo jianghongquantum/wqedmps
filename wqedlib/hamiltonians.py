@@ -140,7 +140,7 @@ def atom_waveguide_markov_hamiltonian_lr(
         H_atom = delta * pe + 0.5 * float(omega) * (sp + sm)
         hm_total = np.kron(H_atom, Ibin) + H_int_L + H_int_R
 
-    return hm_total
+    return hm_total * delta_t
 
 
 def hamiltonian_1tls_feedback(

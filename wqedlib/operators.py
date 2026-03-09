@@ -49,23 +49,8 @@ __all__ = [
     "a_r",
     "a_dag_r",
     "num_op_r",
-    "delta_b_dag",
-    "delta_b",
-    "delta_b_dag_l",
-    "delta_b_dag_r",
-    "delta_b_l",
-    "delta_b_r",
-    "b_dag",
-    "b",
-    "b_dag_l",
-    "b_dag_r",
-    "b_l",
-    "b_r",
-    "b_pop",
-    "b_pop_l",
-    "b_pop_r",
     "u_evol",
-    "swap",
+    "swap_gate",
     "op_list_check",
     "expectation_1bin",
     "expectation_2bins",
@@ -277,200 +262,30 @@ def num_op_r(d_t_total: np.ndarray) -> np.ndarray:
 
 
 # ============================================================
-# Discrete waveguide-bin ladder operators
-# ============================================================
-
-
-def delta_b_dag(delta_t: float, d_t: int = 2) -> np.ndarray:
-    """
-    Discrete-bin creation operator Δb†.
-
-    In time-bin discretization, the continuous field operator is replaced by
-    a discrete operator carrying a factor sqrt(delta_t).
-    """
-    return np.sqrt(delta_t) * np.diag(np.sqrt(np.arange(1, d_t, dtype=float)), -1)
-
-
-def delta_b(delta_t: float, d_t: int = 2) -> np.ndarray:
-    """
-    Discrete-bin annihilation operator Δb.
-    """
-    return np.sqrt(delta_t) * np.diag(np.sqrt(np.arange(1, d_t, dtype=float)), 1)
-
-
-# ============================================================
-# Left / right channel operators
-# ============================================================
-
-
-def delta_b_dag_l(delta_t: float, d_t_total: np.ndarray) -> np.ndarray:
-    """
-    Left-channel creation operator embedded in the full two-channel bin space.
-
-    If d_t_total = [d_l, d_r], then the full bin Hilbert space is
-        H_bin = H_L ⊗ H_R
-    and this returns:
-        Δb_L† ⊗ I_R
-    """
-    d_l, d_r = map(int, np.asarray(d_t_total, dtype=int)[:2])
-    return np.kron(delta_b_dag(delta_t, d_l), np.eye(d_r))
-
-
-def delta_b_dag_r(delta_t: float, d_t_total: np.ndarray) -> np.ndarray:
-    """
-    Right-channel creation operator embedded in the full two-channel bin space:
-        I_L ⊗ Δb_R†
-    """
-    d_l, d_r = map(int, np.asarray(d_t_total, dtype=int)[:2])
-    return np.kron(np.eye(d_l), delta_b_dag(delta_t, d_r))
-
-
-def delta_b_l(delta_t: float, d_t_total: np.ndarray) -> np.ndarray:
-    """
-    Left-channel annihilation operator embedded in the full two-channel bin space:
-        Δb_L ⊗ I_R
-    """
-    d_l, d_r = map(int, np.asarray(d_t_total, dtype=int)[:2])
-    return np.kron(delta_b(delta_t, d_l), np.eye(d_r))
-
-
-def delta_b_r(delta_t: float, d_t_total: np.ndarray) -> np.ndarray:
-    """
-    Right-channel annihilation operator embedded in the full two-channel bin space:
-        I_L ⊗ Δb_R
-    """
-    d_l, d_r = map(int, np.asarray(d_t_total, dtype=int)[:2])
-    return np.kron(np.eye(d_l), delta_b(delta_t, d_r))
-
-
-# ============================================================
-# Rescaled field operators b, b†
-# ============================================================
-
-
-def b_dag(params: InputParams) -> np.ndarray:
-    """
-    Field creation operator b† obtained from Δb† / delta_t.
-    """
-    return delta_b_dag(params.delta_t, params.d_t) / params.delta_t
-
-
-def b(params: InputParams) -> np.ndarray:
-    """
-    Field annihilation operator b obtained from Δb / delta_t.
-    """
-    return delta_b(params.delta_t, params.d_t) / params.delta_t
-
-
-def b_dag_l(params: InputParams) -> np.ndarray:
-    """
-    Left-channel field creation operator.
-    """
-    return delta_b_dag_l(params.delta_t, params.d_t_total) / params.delta_t
-
-
-def b_dag_r(params: InputParams) -> np.ndarray:
-    """
-    Right-channel field creation operator.
-    """
-    return delta_b_dag_r(params.delta_t, params.d_t_total) / params.delta_t
-
-
-def b_l(params: InputParams) -> np.ndarray:
-    """
-    Left-channel field annihilation operator.
-    """
-    return delta_b_l(params.delta_t, params.d_t_total) / params.delta_t
-
-
-def b_r(params: InputParams) -> np.ndarray:
-    """
-    Right-channel field annihilation operator.
-    """
-    return delta_b_r(params.delta_t, params.d_t_total) / params.delta_t
-
-
-# ============================================================
-# Number operators
-# ============================================================
-
-
-def b_pop(params: InputParams) -> np.ndarray:
-    """
-    Total single-bin number operator:
-        b† b
-    """
-    return (
-        delta_b_dag(params.delta_t, params.d_t) @ delta_b(params.delta_t, params.d_t)
-    ) / params.delta_t**2
-
-
-def b_pop_l(params: InputParams) -> np.ndarray:
-    """
-    Left-channel number operator:
-        b_L† b_L
-    """
-    op = delta_b_dag_l(params.delta_t, params.d_t_total) @ delta_b_l(
-        params.delta_t, params.d_t_total
-    )
-    return op / params.delta_t**2
-
-
-def b_pop_r(params: InputParams) -> np.ndarray:
-    """
-    Right-channel number operator:
-        b_R† b_R
-    """
-    op = delta_b_dag_r(params.delta_t, params.d_t_total) @ delta_b_r(
-        params.delta_t, params.d_t_total
-    )
-    return op / params.delta_t**2
-
-
-# ============================================================
 # Evolution gate
 # ============================================================
-
-
 def u_evol(
-    hm: np.ndarray,
+    H: np.ndarray,
     d_sys_total: np.ndarray | int,
     d_t_total: np.ndarray | int,
     interacting_timebins_num: int = 1,
 ) -> np.ndarray:
     """
-    Construct the evolution gate U = exp(-i H) and reshape it as a tensor.
+    Generalized evolution gate:
+        U = exp(-i H delta_t)
 
-    Parameters
-    ----------
-    hm : ndarray
-        Hamiltonian matrix in the combined Hilbert space.
+    For interacting_timebins_num = 1, output shape is
+        (d_sys, d_t, d_sys, d_t)
 
-    d_sys_total : array-like or int
-        Dimensions of the emitter subsystem.
-
-    d_t_total : array-like or int
-        Dimensions of one time bin.
-
-    interacting_timebins_num : int
-        Number of time bins simultaneously involved in the interaction.
-
-    Returns
-    -------
-    ndarray
-        Tensorized evolution operator.
-
-    Notes
-    -----
-    For one interacting time bin, the reshaped gate has structure roughly:
-        (system, time ; system, time)
-    up to the ordering convention used elsewhere in the code.
+    For more interacting bins, output shape is
+        (d_t, ..., d_t, d_sys, d_t, d_t, ..., d_t, d_sys, d_t)
+    according to the chosen convention.
     """
     d_sys = int(np.prod(d_sys_total))
     d_t = int(np.prod(d_t_total))
 
     shape = (((d_t,) * (interacting_timebins_num - 1)) + (d_sys,) + (d_t,)) * 2
-    return expm(-1j * hm).reshape(shape)
+    return expm(-1j * H).reshape(shape)
 
 
 # ============================================================
@@ -478,40 +293,16 @@ def u_evol(
 # ============================================================
 
 
-def swap(dim1: int, dim2: int) -> np.ndarray:
+def swap_gate(d1: int, d2: int) -> np.ndarray:
     """
-    Swap tensor to swap the contents of adjacent MPS bins.
-
-    Parameters
-    ----------
-    dim1 : int
-        Size of the first Hilbert space.
-
-    dim2 : int
-        Size of the second Hilbert space.
-
-    Returns
-    -------
-    oper : ndarray
-        Tensor with shape (dim1, dim2, dim1, dim2).
-
-    Notes
-    -----
-    This is built by first constructing the permutation matrix on the product
-    space H1 ⊗ H2, and then reshaping it into a rank-4 tensor.
-
-    The mapping implemented is the exchange of neighboring local states.
-    This form supports dim1 != dim2, which is necessary when swapping,
-    for example, a 2-level system with a larger waveguide time-bin space.
+    Two-site SWAP gate as rank-4 tensor:
+        S[out1, out2, in1, in2]
     """
-    size = dim1 * dim2
-    S = np.zeros([size, size], dtype=complex)
-
-    for i in range(dim1):
-        for j in range(dim2):
-            S[i + j * dim1, (i * dim2) + j] = 1
-
-    return S.reshape(dim1, dim2, dim1, dim2)
+    S = np.zeros((d2, d1, d1, d2), dtype=complex)
+    for i in range(d1):
+        for j in range(d2):
+            S[j, i, i, j] = 1.0
+    return S
 
 
 # ============================================================
@@ -585,19 +376,21 @@ def single_time_expectation(normalized_bins: list[np.ndarray], ops_list) -> np.n
     Parameters
     ----------
     normalized_bins : list[np.ndarray]
-        Time-ordered local tensors, e.g.
-        bins.system_states or bins.output_field_states.
+        Time-ordered local tensors that already represent valid normalized
+        local states or grouped local states for the subsystem of interest.
+
+        Examples:
+        - system_states stored at the orthogonality center
+        - output_field_states explicitly re-canonicalized before storage
 
     ops_list : np.ndarray or list[np.ndarray]
         One operator or a list of operators.
 
-    Returns
-    -------
-    np.ndarray
-        If one operator:
-            shape (num_times,)
-        If list of operators:
-            shape (num_ops, num_times)
+    Notes
+    -----
+    This function should not be applied directly to arbitrary local tensors
+    extracted from a generic MPS unless they are known to be valid normalized
+    local objects.
     """
     is_list = isinstance(ops_list, (list, tuple))
     if not is_list:

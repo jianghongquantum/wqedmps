@@ -14,7 +14,6 @@ It requires the module ncon (pip install --user ncon)
 """
 
 from dataclasses import dataclass
-from scipy.linalg import expm
 import numpy as np
 import copy
 from ncon import ncon
@@ -25,10 +24,10 @@ from wqedlib.parameters import InputParams, Bins
 from typing import Callable, TypeAlias
 from wqedlib.hamiltonians import Hamiltonian
 from wqedlib.operators import *
-from wqedlib.operators import u_evol, swap
+from wqedlib.operators import u_evol, swap_gate
 from seemps.state import CanonicalMPS, product_state, DEFAULT_STRATEGY
 
-__all__ = ["t_evol_mar", "t_evol_nmar", "t_evol_mar_seemps_lr"]
+__all__ = ["t_evol_mar", "t_evol_nmar", "t_evol_mar_seemps_lr", "BinsSeemps"]
 
 # -----------------------------------
 # Singular Value Decomposition helper
@@ -105,43 +104,6 @@ def _svd_tensors(tensor: np.ndarray, bond_max: int, d_1: int, d_2: int) -> np.nd
 # ============================================================
 
 
-def local_gate_from_hamiltonian(
-    H: np.ndarray,
-    delta_t: float,
-    d_sys_total: np.ndarray | int,
-    d_t_total: np.ndarray | int,
-    interacting_timebins_num: int = 1,
-) -> np.ndarray:
-    """
-    Generalized evolution gate:
-        U = exp(-i H delta_t)
-
-    For interacting_timebins_num = 1, output shape is
-        (d_sys, d_t, d_sys, d_t)
-
-    For more interacting bins, output shape is
-        (d_t, ..., d_t, d_sys, d_t, d_t, ..., d_t, d_sys, d_t)
-    according to the chosen convention.
-    """
-    d_sys = int(np.prod(d_sys_total))
-    d_t = int(np.prod(d_t_total))
-
-    shape = (((d_t,) * (interacting_timebins_num - 1)) + (d_sys,) + (d_t,)) * 2
-    return expm(-1j * H * delta_t).reshape(shape)
-
-
-def swap_gate(d1: int, d2: int) -> np.ndarray:
-    """
-    Two-site SWAP gate as rank-4 tensor:
-        S[out1, out2, in1, in2]
-    """
-    S = np.zeros((d2, d1, d1, d2), dtype=complex)
-    for i in range(d1):
-        for j in range(d2):
-            S[j, i, i, j] = 1.0
-    return S
-
-
 def _set_bond_limit(strategy, bond_max: int):
     """
     Handle possible seemps version differences.
@@ -211,69 +173,105 @@ def t_evol_mar_seemps_lr(
     """
     Markovian time-bin evolution for one TLS coupled to a bidirectional waveguide.
 
-    Chain:
+    Initial chain at t=0:
         [system, bin0, bin1, ..., bin_{n_steps-1}]
 
-    At step k:
-        1) apply local atom-bin gate on sites (k, k+1)
-        2) split/truncate with update_2site_right(...)
-        3) apply SWAP on the same pair
-        4) after SWAP:
-             site k   = emitted output bin
-             site k+1 = atom
+    Discrete times:
+        t_k = k * delta_t,  k = 0, 1, ..., n_steps
+
+    Storage convention
+    ------------------
+    - system_states[k]:
+        local system tensor at time t_k, stored in a gauge where it can be used
+        directly with expectation_1bin().
+
+    - output_field_states[k]:
+        local field-bin tensor associated with time t_k.
+        * output_field_states[0] is the initial bin0 state at t=0
+        * for k >= 1, output_field_states[k] is the emitted bin from step k-1,
+          re-canonicalized so that it can be used directly with expectation_1bin()
+
+    Important
+    ---------
+    A single MPS cannot have both site k and site k+1 as orthogonality center
+    simultaneously.
+
+    Therefore:
+    - system_states are stored from the evolution MPS `psi`
+    - output_field_states are stored from a temporary MPS
+      `CanonicalMPS(psi, center=k, normalize=False)`
 
     Returns
     -------
     BinsSeemps
-        Contains Qwave-style local tensors + optional full MPS snapshots.
     """
     delta_t = params.delta_t
     n_steps = int(round(params.tmax / delta_t))
+
     d_sys = int(np.prod(params.d_sys_total))
     d_t = int(np.prod(params.d_t_total))
 
-    i_s0 = np.asarray(i_s0, complex).reshape(-1)
-    i_n0 = np.asarray(i_n0, complex).reshape(-1)
+    i_s0 = np.asarray(i_s0, dtype=complex).reshape(-1)
+    i_n0 = np.asarray(i_n0, dtype=complex).reshape(-1)
 
     if i_s0.size != d_sys:
         raise ValueError(f"d_sys={d_sys}, but len(i_s0)={i_s0.size}")
     if i_n0.size != d_t:
         raise ValueError(f"d_t={d_t}, but len(i_n0)={i_n0.size}")
 
+    # Initial product MPS:
+    # [system, bin0, bin1, ..., bin_{n_steps-1}]
     psi = make_product_mps(i_s0, i_n0, n_steps)
 
     strategy = DEFAULT_STRATEGY.replace(tolerance=getattr(params, "atol", 1e-12))
     strategy = _set_bond_limit(strategy, params.bond_max)
 
     SWAP = swap_gate(d_sys, d_t)
+    times = np.arange(n_steps + 1, dtype=float) * delta_t
 
-    system_states: list[np.ndarray] = []
-    output_field_states: list[np.ndarray] = []
-    mps_states: list[CanonicalMPS] = []
+    # ------------------------------------------------------------
+    # Store t = 0
+    # ------------------------------------------------------------
+    system_states: list[np.ndarray] = [np.array(psi[0], copy=True)]
+    output_field_states: list[np.ndarray] = [np.array(psi[1], copy=True)]
+    mps_states: list[CanonicalMPS] = [copy_mps(psi)] if store_mps else []
     schmidt: list[np.ndarray] = [np.array([1.0])]
-    times = np.arange(n_steps + 1) * delta_t
 
+    # ------------------------------------------------------------
+    # Time evolution
+    # ------------------------------------------------------------
     for k in range(n_steps):
         Hk = ham(k) if callable(ham) else ham
-        U = local_gate_from_hamiltonian(Hk, delta_t, d_sys, d_t)
+        U = u_evol(Hk, d_sys, d_t)
 
-        # 1) atom-bin interaction
+        # 1) atom-bin interaction on sites (k, k+1)
         theta = merge_two_sites(psi, k)
         theta = apply_two_site_gate(theta, U)
+
+        # Schmidt values before truncation
         schmidt.append(schmidt_values(theta, chi_max=params.bond_max))
+
         psi.update_2site_right(theta, k, strategy)
 
-        # 2) swap atom with current output bin
+        # 2) swap atom with current bin
         theta = merge_two_sites(psi, k)
         theta = apply_two_site_gate(theta, SWAP)
         psi.update_2site_right(theta, k, strategy)
 
-        # After SWAP:
-        #   psi[k]   -> output bin tensor
-        #   psi[k+1] -> atom tensor
-        output_field_states.append(np.array(psi[k], copy=True))
+        # --------------------------------------------------------
+        # Store system from the current evolution gauge
+        # --------------------------------------------------------
         system_states.append(np.array(psi[k + 1], copy=True))
 
+        # --------------------------------------------------------
+        # Store emitted bin from a temporary gauge centered at site k
+        # --------------------------------------------------------
+        psi_bin = CanonicalMPS(psi, center=k, normalize=False)
+        output_field_states.append(np.array(psi_bin[k], copy=True))
+
+        # --------------------------------------------------------
+        # Optional full MPS snapshot
+        # --------------------------------------------------------
         if store_mps:
             mps_states.append(copy_mps(psi))
 
