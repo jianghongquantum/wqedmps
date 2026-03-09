@@ -17,13 +17,13 @@ import numpy as np
 import copy
 from ncon import ncon
 from scipy.linalg import svd, norm
-from Qlib import states as states
+from wqedlib import states as states
 from collections.abc import Iterator
-from Qlib.parameters import InputParams, Bins
+from wqedlib.parameters import InputParams, Bins
 from typing import Callable, TypeAlias
-from Qlib.hamiltonians import Hamiltonian
-from Qlib.operators import *
-from Qlib.operators import u_evol, swap
+from wqedlib.hamiltonians import Hamiltonian
+from wqedlib.operators import *
+from wqedlib.operators import u_evol, swap
 
 __all__ = ["t_evol_mar", "t_evol_nmar"]
 

@@ -1,7 +1,11 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "frustration-in-wqed"
 version = "0.1.0"
-description = "Add your description here"
+description = "Waveguide QED tools"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -18,5 +22,10 @@ dev = [
     "ruff>=0.14.4",
     "scipy-stubs>=1.16.3.0",
 ]
+
 [tool.uv.sources]
 seemps = { git = "https://github.com/juanjosegarciaripoll/seemps2.git" }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["wqedlib*"]

@@ -11,8 +11,8 @@ This module contains Hamiltonian constructors for different cases:
 """
 
 import numpy as np
-from Qlib.operators import *
-from Qlib.parameters import InputParams
+from wqedlib.operators import *
+from wqedlib.parameters import InputParams
 from typing import Callable, TypeAlias
 
 # Type alias: Hamiltonian can be either a single ndarray or a callable indexed by time point for time dependent cases

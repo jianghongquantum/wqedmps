@@ -13,15 +13,15 @@ import numpy as np
 import copy
 from ncon import ncon
 
-from Qlib.simulation import _svd_tensors
-from Qlib.operators import (
+from wqedlib.simulation import _svd_tensors
+from wqedlib.operators import (
     op_list_check,
     expectation_1bin,
     expectation_nbins,
     swap,
     single_time_expectation,
 )
-from Qlib.parameters import InputParams
+from wqedlib.parameters import InputParams
 
 __all__ = [
     "spectrum_w",
