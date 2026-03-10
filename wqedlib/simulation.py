@@ -368,28 +368,21 @@ def t_evol_nmar_seemps(
     params: InputParams,
 ) -> BinsSeempsNMar:
     """
-    Non-Markovian time evolution with a finite feedback delay.
+    Non-Markovian time evolution with finite delay.
 
-    The evolution follows the same logic as the original QwaveMPS
-    non-Markovian routine, but implemented with local two-site updates
-    in SeeMPS.
+    SeeMPS implementation of the QwaveMPS non-Markovian algorithm.
 
-    At each time step:
-        1. bring the delayed feedback bin next to the system,
-        2. combine feedback + system,
-        3. prepare the current input bin,
-        4. apply the local three-body gate on
-               [feedback_bin | system | current_bin],
-        5. split back into feedback / system / loop-output tensors,
-        6. write the updated feedback bin back into the delay line,
-        7. swap it back to restore the ordering.
+    At each step the system interacts with
 
-    Important convention:
-    - tensors stored for observables are saved with the orthogonality
-      center on the measured site,
-    - tensors stored in the internal delay line follow the gauge needed
-      by the next evolution step and are not always the same as the
-      observable snapshots.
+        [feedback_bin | system | current_bin]
+
+    where the delayed feedback bin is first swapped next to the system.
+    After the local evolution the updated feedback bin is written back
+    into the delay line and swapped back to restore the ordering.
+
+    Observable tensors are stored with the orthogonality center on the
+    measured site, while tensors inside the delay line follow the gauge
+    required for the next evolution step.
     """
 
     delta_t = params.delta_t
@@ -400,9 +393,7 @@ def t_evol_nmar_seemps(
     delay_steps = int(round(tau / delta_t))
 
     if delay_steps < 1:
-        raise ValueError(
-            "For non-Markovian evolution, tau must satisfy tau >= delta_t."
-        )
+        raise ValueError("tau must satisfy tau >= delta_t")
 
     d_sys = int(np.prod(params.d_sys_total))
     d_bin = int(np.prod(params.d_t_total))
@@ -414,38 +405,37 @@ def t_evol_nmar_seemps(
 
     swap_sys_bin = swap_gate(d_sys, d_bin)
     swap_bin_bin = swap_gate(d_bin, d_bin)
+
     times = np.arange(n_steps + 1) * delta_t
 
-    # input generator: i_n0 first, then vacuum forever
+    # Input field generator: first i_n0 then vacuum bins
     input_field = states.input_state_generator(
         params.d_t_total,
         input_bins=[np.asarray(i_n0, dtype=complex)],
     )
 
     # ------------------------------------------------------------
-    # Initial tensors and storage
+    # Initial tensors
     # ------------------------------------------------------------
     psi_sys = np.asarray(i_s0, dtype=complex)
 
-    system_states = [np.array(psi_sys, copy=True)]
-    loop_field_states = [states.wg_ground(d_bin)]
-    output_field_states = [states.wg_ground(d_bin)]
-    input_field_states = [states.wg_ground(d_bin)]
-    correlation_bins = [states.wg_ground(d_bin)]
+    vacuum = states.wg_ground(d_bin)
+
+    system_states = [psi_sys.copy()]
+    loop_field_states = [vacuum.copy()]
+    output_field_states = [vacuum.copy()]
+    input_field_states = [vacuum.copy()]
+    correlation_bins = [vacuum.copy()]
 
     schmidt = [np.array([1.0])]
     schmidt_tau = [np.array([1.0])]
 
     # Internal delay line
-    delay_line: list[np.ndarray] = [states.wg_ground(d_bin) for _ in range(delay_steps)]
+    delay_line = [vacuum.copy() for _ in range(delay_steps)]
 
-    # System tensor carried between steps:
-    # after step 8 this is the normalized system tensor (no center),
-    # exactly like the original Qwave non-Markovian code.
-    system_tensor = np.array(psi_sys, copy=True)
+    # System tensor propagated between steps
+    system_tensor = psi_sys.copy()
 
-    # Final centered feedback tensor for the overwrite of the last
-    # correlation bin
     last_feedback_center = None
 
     # ============================================================
@@ -453,23 +443,19 @@ def t_evol_nmar_seemps(
     # ============================================================
     for step in range(n_steps):
         # --------------------------------------------------------
-        # Local interaction gate
-        #
-        # Ordering:
-        #   [feedback_bin, system, current_bin]
+        # Local three-body gate
         # --------------------------------------------------------
         H = ham(step) if callable(ham) else ham
         U_int = u_evol(H, d_sys, d_bin, 2)
 
         # --------------------------------------------------------
-        # 1. Bring delayed feedback bin next to the system
+        # 1. Bring delayed feedback bin next to system
         # --------------------------------------------------------
-        feedback_bin = np.array(delay_line[step], copy=True)
+        feedback_bin = delay_line[step].copy()
 
         for j in range(step, step + delay_steps - 1):
-            next_bin = np.array(delay_line[j + 1], copy=True)
+            next_bin = delay_line[j + 1].copy()
 
-            # [feedback_bin | next_bin] -> [next_bin | feedback_bin]
             theta = np.einsum(
                 "aic,cjd,pqij->apqd",
                 feedback_bin,
@@ -485,59 +471,46 @@ def t_evol_nmar_seemps(
             )
             mps_swap.update_2site_right(theta, 0, strategy)
 
-            delay_line[j] = np.array(mps_swap[0], copy=True)  # normalized left tensor
-            feedback_bin = np.array(mps_swap[1], copy=True)  # centered right tensor
+            delay_line[j] = np.array(mps_swap[0], copy=True)
+            feedback_bin = np.array(mps_swap[1], copy=True)
 
         # --------------------------------------------------------
-        # 2. Combine [feedback_bin | system]
-        #
-        # Move center to the system site
+        # 2. Combine [feedback | system]
         # --------------------------------------------------------
         mps_fs = CanonicalMPS(
             [feedback_bin.copy(), system_tensor.copy()],
             center=0,
             normalize=False,
         )
+
         theta = np.tensordot(mps_fs[0], mps_fs[1], axes=(2, 0))
         mps_fs.update_2site_right(theta, 0, strategy)
 
-        feedback_left = np.array(mps_fs[0], copy=True)  # normalized left tensor
-        system_tensor = np.array(mps_fs[1], copy=True)  # centered system tensor
+        feedback_left = np.array(mps_fs[0], copy=True)
+        system_tensor = np.array(mps_fs[1], copy=True)
 
         # --------------------------------------------------------
-        # 3. Current input bin
+        # 3. Read current input bin
         # --------------------------------------------------------
         input_bin = np.asarray(next(input_field), dtype=complex)
 
-        # --------------------------------------------------------
-        # 4. Store input bin with center on the bin
-        # --------------------------------------------------------
-        mps_in_pair = CanonicalMPS(
+        # store with center on bin
+        mps_in = CanonicalMPS(
             [system_tensor.copy(), input_bin.copy()],
             center=0,
             normalize=False,
         )
-        theta_in = np.tensordot(mps_in_pair[0], mps_in_pair[1], axes=(2, 0))
 
-        mps_in = CanonicalMPS(
-            [np.array(mps_in_pair[0], copy=True), np.array(mps_in_pair[1], copy=True)],
-            center=0,
-            normalize=False,
-        )
+        theta_in = np.tensordot(mps_in[0], mps_in[1], axes=(2, 0))
         mps_in.update_2site_right(theta_in, 0, strategy)
 
-        # centered input-bin snapshot
-        input_field_states.append(np.array(mps_in[1], copy=True))
+        system_left = np.array(mps_in[0], copy=True)
+        input_bin_oc = np.array(mps_in[1], copy=True)
 
-        system_left = np.array(mps_in[0], copy=True)  # normalized left tensor
-        input_bin_oc = np.array(mps_in[1], copy=True)  # centered input tensor
+        input_field_states.append(input_bin_oc)
 
         # --------------------------------------------------------
-        # 5. Local three-body evolution:
-        #    [feedback_left | system_left | input_bin_oc]
-        #
-        # Output order:
-        #    [feedback_bin | system | loop_bin]
+        # 4. Local interaction
         # --------------------------------------------------------
         theta = np.einsum(
             "aic,cjd,dkb,pqrijk->apqrb",
@@ -549,60 +522,43 @@ def t_evol_nmar_seemps(
         )
 
         # --------------------------------------------------------
-        # 6. Split into
-        #    [feedback_bin] | [system, loop_bin]
-        #
-        # Center moved to the right block
+        # 5. Split [feedback] | [system, loop]
         # --------------------------------------------------------
         theta = theta.reshape(theta.shape[0], d_bin, d_sys * d_bin, theta.shape[-1])
 
         left_dummy = np.zeros((theta.shape[0], d_bin, 1), dtype=complex)
         right_dummy = np.zeros((1, d_sys * d_bin, theta.shape[-1]), dtype=complex)
-        left_dummy[:, 0, 0] = 1.0
-        right_dummy[0, 0, :] = 1.0
+        left_dummy[:, 0, 0] = 1
+        right_dummy[0, 0, :] = 1
 
-        mps_fb_rest = CanonicalMPS(
-            [left_dummy, right_dummy],
-            center=0,
-            normalize=False,
-        )
+        mps_fb_rest = CanonicalMPS([left_dummy, right_dummy], center=0, normalize=False)
         mps_fb_rest.update_2site_right(theta, 0, strategy)
 
-        feedback_left_new = np.array(mps_fb_rest[0], copy=True)  # normalized
-        rest_oc = np.array(mps_fb_rest[1], copy=True)  # centered right block
+        feedback_left_new = np.array(mps_fb_rest[0], copy=True)
+        rest_oc = np.array(mps_fb_rest[1], copy=True)
 
         # --------------------------------------------------------
-        # 7. Split [system, loop_bin]
-        #
-        # Move center to the system site
+        # 6. Split [system | loop]
         # --------------------------------------------------------
         theta = rest_oc.reshape(rest_oc.shape[0], d_sys, d_bin, rest_oc.shape[-1])
 
         left_dummy = np.zeros((theta.shape[0], d_sys, 1), dtype=complex)
         right_dummy = np.zeros((1, d_bin, theta.shape[-1]), dtype=complex)
-        left_dummy[:, 0, 0] = 1.0
-        right_dummy[0, 0, :] = 1.0
+        left_dummy[:, 0, 0] = 1
+        right_dummy[0, 0, :] = 1
 
         mps_sys_loop = CanonicalMPS(
-            [left_dummy, right_dummy],
-            center=1,
-            normalize=False,
+            [left_dummy, right_dummy], center=1, normalize=False
         )
         mps_sys_loop.update_2site_left(theta, 0, strategy)
 
         system_tensor_centered = np.array(mps_sys_loop[0], copy=True)
         loop_bin = np.array(mps_sys_loop[1], copy=True)
 
-        # centered system snapshot for local observables
-        system_states.append(np.array(system_tensor_centered, copy=True))
+        system_states.append(system_tensor_centered)
 
         # --------------------------------------------------------
-        # 8. Swap [system | loop_bin] -> [loop_bin | system]
-        #
-        # This should leave the center on the LEFT loop-bin site,
-        # matching the original Qwave logic:
-        #   loop bin carries the center,
-        #   system tensor becomes normalized and is carried forward.
+        # 7. Swap [system | loop] → [loop | system]
         # --------------------------------------------------------
         theta = np.einsum(
             "aic,cjd,pqij->apqd",
@@ -614,56 +570,37 @@ def t_evol_nmar_seemps(
 
         left_dummy = np.zeros((theta.shape[0], d_bin, 1), dtype=complex)
         right_dummy = np.zeros((1, d_sys, theta.shape[-1]), dtype=complex)
-        left_dummy[:, 0, 0] = 1.0
-        right_dummy[0, 0, :] = 1.0
+        left_dummy[:, 0, 0] = 1
+        right_dummy[0, 0, :] = 1
 
         mps_loop_sys = CanonicalMPS(
-            [left_dummy, right_dummy],
-            center=1,
-            normalize=False,
+            [left_dummy, right_dummy], center=1, normalize=False
         )
         mps_loop_sys.update_2site_left(theta, 0, strategy)
 
-        loop_bin_centered = np.array(mps_loop_sys[0], copy=True)  # centered loop bin
-        system_tensor = np.array(mps_loop_sys[1], copy=True)  # normalized system tensor
+        loop_bin_centered = np.array(mps_loop_sys[0], copy=True)
+        system_tensor = np.array(mps_loop_sys[1], copy=True)
 
         # --------------------------------------------------------
-        # 9. Reattach loop bin to the feedback branch
-        #
-        # Original Qwave logic:
-        #   feedback bin written back into delay line carries center
-        #   newly emitted loop bin appended to delay line is normalized
-        #
-        # Observable snapshots:
-        #   loop_field_states  -> centered loop bin
-        #   output_field_states -> centered feedback bin
+        # 8. Attach loop bin to feedback branch
         # --------------------------------------------------------
         theta = np.tensordot(feedback_left_new, loop_bin_centered, axes=(2, 0))
 
         left_dummy = np.zeros((theta.shape[0], d_bin, 1), dtype=complex)
         right_dummy = np.zeros((1, d_bin, theta.shape[-1]), dtype=complex)
-        left_dummy[:, 0, 0] = 1.0
-        right_dummy[0, 0, :] = 1.0
+        left_dummy[:, 0, 0] = 1
+        right_dummy[0, 0, :] = 1
 
-        mps_fb_loop = CanonicalMPS(
-            [left_dummy, right_dummy],
-            center=0,
-            normalize=False,
-        )
+        mps_fb_loop = CanonicalMPS([left_dummy, right_dummy], center=0, normalize=False)
         mps_fb_loop.update_2site_right(theta, 0, strategy)
 
-        feedback_left_mid = np.array(
-            mps_fb_loop[0], copy=True
-        )  # normalized left tensor
-        loop_bin_oc = np.array(mps_fb_loop[1], copy=True)  # centered right tensor
+        feedback_left_mid = np.array(mps_fb_loop[0], copy=True)
+        loop_bin_oc = np.array(mps_fb_loop[1], copy=True)
 
         w_fb = np.array(mps_fb_loop.Schmidt_weights(), copy=True)
-        s_fb = np.sqrt(np.maximum(w_fb, 0.0))
-        schmidt.append(s_fb[: params.bond_max])
+        schmidt.append(np.sqrt(np.maximum(w_fb, 0))[: params.bond_max])
 
-        # Build a copy pair to obtain:
-        # - centered feedback tensor on the left
-        # - normalized loop tensor on the right
+        # move center to feedback bin
         mps_store = CanonicalMPS(
             [feedback_left_mid.copy(), loop_bin_oc.copy()],
             center=1,
@@ -674,37 +611,27 @@ def t_evol_nmar_seemps(
         feedback_bin_centered = np.array(mps_store[0], copy=True)
         loop_bin_internal = np.array(mps_store[1], copy=True)
 
-        # Snapshots for observables
-        output_field_states.append(np.array(feedback_bin_centered, copy=True))
-        loop_field_states.append(np.array(loop_bin_oc, copy=True))
+        output_field_states.append(feedback_bin_centered)
+        loop_field_states.append(loop_bin_oc)
 
-        # Internal delay line:
-        # far-end feedback bin keeps the center
-        delay_line[step + delay_steps - 1] = np.array(feedback_bin_centered, copy=True)
-        # newly emitted loop bin is appended WITHOUT the center
-        delay_line.append(np.array(loop_bin_internal, copy=True))
+        delay_line[step + delay_steps - 1] = feedback_bin_centered
+        delay_line.append(loop_bin_internal)
 
         # --------------------------------------------------------
-        # 10. Swap the centered feedback bin back through the delay line
+        # 9. Swap feedback bin back through delay line
         # --------------------------------------------------------
         if delay_steps == 1:
             schmidt_tau.append(np.array([1.0]))
-
-            # correlation tensor: normalized left tensor
-            correlation_bins.append(np.array(feedback_left_mid, copy=True))
-
-            # last centered feedback tensor
-            last_feedback_center = np.array(feedback_bin_centered, copy=True)
+            correlation_bins.append(feedback_left_mid.copy())
+            last_feedback_center = feedback_bin_centered.copy()
 
         else:
-            current_feedback = np.array(feedback_bin_centered, copy=True)  # centered
+            current_feedback = feedback_bin_centered.copy()
             right_bin = None
-            s_tau = np.array([1.0], dtype=float)
 
             for j in range(step + delay_steps - 1, step, -1):
-                prev_bin = np.array(delay_line[j - 1], copy=True)
+                prev_bin = delay_line[j - 1].copy()
 
-                # [prev_bin | current_feedback] -> [current_feedback | prev_bin]
                 theta = np.einsum(
                     "aic,cjd,pqij->apqd",
                     prev_bin,
@@ -715,8 +642,8 @@ def t_evol_nmar_seemps(
 
                 left_dummy = np.zeros((theta.shape[0], d_bin, 1), dtype=complex)
                 right_dummy = np.zeros((1, d_bin, theta.shape[-1]), dtype=complex)
-                left_dummy[:, 0, 0] = 1.0
-                right_dummy[0, 0, :] = 1.0
+                left_dummy[:, 0, 0] = 1
+                right_dummy[0, 0, :] = 1
 
                 mps_back = CanonicalMPS(
                     [left_dummy, right_dummy],
@@ -725,53 +652,29 @@ def t_evol_nmar_seemps(
                 )
                 mps_back.update_2site_left(theta, 0, strategy)
 
-                current_feedback = np.array(mps_back[0], copy=True)  # centered left
-                right_bin = np.array(mps_back[1], copy=True)  # normalized right
+                current_feedback = np.array(mps_back[0], copy=True)
+                right_bin = np.array(mps_back[1], copy=True)
 
-                w_tau = np.array(mps_back.Schmidt_weights(), copy=True)
-                s_tau = np.sqrt(np.maximum(w_tau, 0.0))
+                delay_line[j] = right_bin.copy()
 
-                # bins farther right stay normalized in the internal chain
-                delay_line[j] = np.array(right_bin, copy=True)
+            schmidt_tau.append(np.array(mps_back.Schmidt_weights())[: params.bond_max])
 
-            schmidt_tau.append(s_tau[: params.bond_max])
-
-            if right_bin is None:
-                raise RuntimeError(
-                    "Unexpected empty swap-back result in non-Markovian step."
-                )
-
-            # Build a copy pair from the final swap-back result
-            # current_feedback: centered left
-            # right_bin       : normalized right
             mps_tau = CanonicalMPS(
                 [current_feedback.copy(), right_bin.copy()],
                 center=0,
                 normalize=False,
             )
-
-            # Move center to the right site:
-            # this reproduces the original Qwave logic
-            #   nbins[k+1] = s * i_n2
             mps_tau.recenter(1)
 
-            # INTERNAL next delayed bin must carry the center
             delay_line[step + 1] = np.array(mps_tau[1], copy=True)
 
-            # Correlation tensor: normalized left tensor from the same pair
             correlation_bins.append(np.array(mps_tau[0], copy=True))
 
-            # Final centered feedback tensor (left-centered version)
-            mps_tau_fb = CanonicalMPS(
-                [current_feedback.copy(), right_bin.copy()],
-                center=0,
-                normalize=False,
-            )
-            mps_tau_fb.recenter(0)
-            last_feedback_center = np.array(mps_tau_fb[0], copy=True)
+            mps_tau.recenter(0)
+            last_feedback_center = np.array(mps_tau[0], copy=True)
 
     # ------------------------------------------------------------
-    # Overwrite last correlation bin with centered feedback tensor
+    # Replace last correlation tensor
     # ------------------------------------------------------------
     if n_steps > 0 and last_feedback_center is not None:
         correlation_bins[-1] = last_feedback_center.copy()
