@@ -44,83 +44,95 @@ __all__ = [
 # ============================================================
 
 
-def wg_ground(d_t: int) -> np.ndarray:
+def wg_ground(d_t: int, bond0: int = 1) -> np.ndarray:
     """
-    Ground state of a waveguide time bin.
+    Waveguide vacuum state for a single time bin.
 
     Parameters
     ----------
     d_t : int
-        Hilbert space dimension of the time bin.
-        Typically d_t = d_t_l * d_t_r.
+        Size of the truncated Hilbert space of the light field.
+
+    bond0 : int, default: 1
+        Initial size of the bond dimension.
 
     Returns
     -------
-    ndarray
-        Tensor with shape (bond_left, physical_dim, bond_right)
-
-        Represents |0> (vacuum) in the waveguide bin.
+    state : ndarray
+        Waveguide vacuum state.
     """
-    state = np.zeros(int(d_t), dtype=complex)
-
-    # index 0 corresponds to vacuum state
-    state[0] = 1.0
-
+    state = np.zeros([bond0, d_t, bond0], dtype=complex)
+    state[:, 0, :] = 1.0
     return state
 
 
-def tls_ground() -> np.ndarray:
+def tls_ground(bond0: int = 1) -> np.ndarray:
     """
-    Ground state of a two-level system.
+    Two level system ground state tensor.
 
-    Basis convention:
-        |g> = [1,0]
-        |e> = [0,1]
+    Parameters
+    ----------
+    bond0 : int, default: 1
+        Initial size of the bond dimension.
+
+    Returns
+    -------
+    state : ndarray
+        Ground state of the two level system.
     """
-    return np.array([1.0, 0.0], dtype=complex)
+    i_s = np.zeros([bond0, 2, bond0], dtype=complex)
+    i_s[:, 0, :] = 1.0
+    return i_s
 
 
-def tls_excited() -> np.ndarray:
+def tls_excited(bond0: int = 1) -> np.ndarray:
     """
-    Excited state of a two-level system.
+    Two level system excited state tensor.
+
+    Parameters
+    ----------
+    bond0 : int, default: 1
+        Initial size of the bond dimension.
+
+    Returns
+    -------
+    state : ndarray
+        Excited state of the two level system.
     """
-    return np.array([0.0, 1.0], dtype=complex)
+    i_s = np.zeros([bond0, 2, bond0], dtype=complex)
+    i_s[:, 1, :] = 1.0
+    return i_s
 
 
 # ============================================================
 # Waveguide vacuum initialization
 # ============================================================
-
-
 def vacuum(time_length: float, params: InputParams) -> list[np.ndarray]:
     """
-    Generate vacuum input bins for the full simulation time.
-
-    The waveguide is discretized into time bins of size delta_t.
-    This function creates the sequence of vacuum bins used
-    as the default input field.
+    Produces an array of vacuum time bins for a given time_length.
 
     Parameters
     ----------
+
     time_length : float
-        Total time for which vacuum bins are required.
+        Length of the vacuum pulse (units of inverse coupling).
 
     params : InputParams
-        Simulation parameters.
+        Class containing the input parameters.
 
     Returns
     -------
-    list of MPS tensors
-        Each tensor represents one vacuum time bin.
+    state : list[np.ndarray]
+        List of vacuum states for time_length.
     """
-    m = int(round(time_length / params.delta_t))
+    delta_t = params.delta_t
+    d_t_total = params.d_t_total
 
-    return [wg_ground(params.d_t) for _ in range(m)]
+    bond0 = 1
+    l = int(round(time_length / delta_t, 0))
+    d_t = np.prod(d_t_total)
 
-
-# ============================================================
-# Input state generator
-# ============================================================
+    return [wg_ground(d_t, bond0) for i in range(l)]
 
 
 def input_state_generator(
@@ -129,40 +141,12 @@ def input_state_generator(
     bond0: int = 1,
     default_state: np.ndarray | None = None,
 ) -> Iterator[np.ndarray]:
-    """
-    Generator producing input field bins sequentially.
-
-    This allows the simulation to pull time bins lazily.
-
-    If the provided input bins are exhausted,
-    the generator continues yielding vacuum states.
-
-    Parameters
-    ----------
-    d_t_total : array-like
-        Dimensions of the waveguide channels.
-
-    input_bins : list of tensors
-        Predefined input states.
-
-    bond0 : int
-        Bond dimension for default states.
-
-    default_state : ndarray
-        Optional custom filler state.
-
-    Returns
-    -------
-    iterator of tensors
-    """
     d_t = int(np.prod(d_t_total))
 
-    # yield provided bins first
     for tensor in [] if input_bins is None else input_bins:
         yield tensor
 
-    # afterwards fill with vacuum
-    filler = wg_ground(d_t, bond0) if default_state is None else default_state
+    filler = wg_ground(d_t) if default_state is None else default_state
 
     while True:
         yield filler
