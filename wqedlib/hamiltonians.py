@@ -1,26 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-This module contains Hamiltonian constructors for different cases:
-    - Single two-level system coupled to an infinite waveguide
-    - Single two-level system with a mirror (feedback / semi-infinite waveguide)
-    - Two two-level systems in the waveguide: Markovian regime (mar)
-    - Two two-level systems in the waveguide: non-Markovian regime (nmar)
-
-"""
+from __future__ import annotations
 
 import numpy as np
-from wqedlib.operators import *
-from wqedlib.parameters import InputParams
 from typing import Callable, TypeAlias
 
-# Type alias: Hamiltonian can be either a single ndarray or a callable indexed by time point for time dependent cases
+from wqedlib.operators import (
+    sigma_plus,
+    sigma_minus,
+    proj_excited,
+    a,
+    a_dag,
+    a_l,
+    a_r,
+    a_dag_l,
+    a_dag_r,
+)
+from wqedlib.parameters import InputParams
+
 Hamiltonian: TypeAlias = np.ndarray | Callable[[int], np.ndarray]
 
 __all__ = [
     "hamiltonian_1tls",
-    "atom_waveguide_markov_hamiltonian_lr",
     "hamiltonian_1tls_feedback",
     "hamiltonian_2tls_mar",
     "hamiltonian_2tls_nmar",
@@ -28,202 +30,118 @@ __all__ = [
 ]
 
 
+def _is_array_drive(x) -> bool:
+    return isinstance(x, np.ndarray)
+
+
 def hamiltonian_1tls(
-    params: InputParams, omega: float | np.ndarray = 0, delta: float = 0
+    params: InputParams,
+    omega: float | np.ndarray = 0,
+    delta: float = 0,
 ) -> Hamiltonian:
     """
-    Hamiltonian for 1 two-level system coupled to an infinite waveguide.
-
-    The returned Hamiltonian includes:
-        - A classical pump term (omega) acting on the TLS, :math:`\\Omega(\\sigma^+ + \\sigma^-)`
-        - A detuning term for the TLS, :math:`\\delta |e\\rangle\\langle e|`.
-        - Interaction terms between the TLS and left/right photonic modes.
-
-    Parameters
-    ----------
-    params : InputParams
-        Class containing the input parameters.
-
-    omega : float/np.ndarray, default: 0
-       Classical pump amplitude.
-       If a float is provided (CW pump) a single Hamiltonian ndarray is returned.
-       If a 1D np.ndarray is given (pulsed light), the
-       function returns a callable hm_total(t_k) that yields the Hamiltonian
-       at discrete time index t_k using omega[t_k].
-
-    delta : float, optional
-        Detuning between the pump and two-level system transition frequency.
-
-    Returns
-    -------
-    Hamiltonian : np.ndarray | Callable[[int], np.ndarray]
-        Hamiltonian as a numpy.ndarray (time-independent drive) or a callable that
-        accepts a time index and returns the Hamiltonian (time-dependent drive).
+    One TLS + bidirectional waveguide time bin.
+    Returns H * delta_t.
     """
     delta_t = params.delta_t
-    d_t_total = params.d_t_total
-    d_sys_total = params.d_sys_total
-    gamma_l = params.gamma_l
-    gamma_r = params.gamma_r
+    d_t_total = np.asarray(params.d_t_total, dtype=int)
+    d_sys_total = np.asarray(params.d_sys_total, dtype=int)
 
-    d_t_l = d_t_total[0]
-    d_t_r = d_t_total[1]
-    d_sys = np.prod(d_sys_total)
-    t1 = np.sqrt(gamma_l) * (
-        np.kron(sigmaplus(), delta_b_l(delta_t, d_t_total))
-        + np.kron(sigmaminus(), delta_b_dag_l(delta_t, d_t_total))
-    )
-    t2 = np.sqrt(gamma_r) * (
-        np.kron(sigmaplus(), delta_b_r(delta_t, d_t_total))
-        + np.kron(sigmaminus(), delta_b_dag_r(delta_t, d_t_total))
-    )
-    if isinstance(omega, np.ndarray):
-        omegas = tuple(omega)
-
-        def hm_total(t_k):
-            hm_sys = omegas[t_k] / 2 * delta_t * (
-                np.kron(sigmaplus(), np.eye(d_t_l * d_t_r))
-                + np.kron(sigmaminus(), np.eye(d_t_l * d_t_r))
-            ) + delta_t * delta * np.kron(e(d_sys), np.eye(d_t_l * d_t_r))
-            hm = hm_sys + t1 + t2
-            return hm
-    else:
-        hm_sys = omega / 2 * delta_t * (
-            np.kron(sigmaplus(), np.eye(d_t_l * d_t_r))
-            + np.kron(sigmaminus(), np.eye(d_t_l * d_t_r))
-        ) + delta_t * delta * np.kron(e(d_sys), np.eye(d_t_l * d_t_r))
-        hm_total = hm_sys + t1 + t2
-    return hm_total
-
-
-def atom_waveguide_markov_hamiltonian_lr(
-    params: InputParams, omega: float | np.ndarray = 0, delta: float = 0
-) -> Hamiltonian:
-    """
-    Hamiltonian for 1 two-level system coupled to a bidirectional waveguide.
-
-    Same functionality as hamiltonian_1tls():
-    - scalar omega -> return ndarray
-    - array omega  -> return callable hm_total(t_k)
-    """
-    delta_t = params.delta_t
-    d_t_total = tuple(map(int, params.d_t_total))
-    d_sys_total = tuple(map(int, params.d_sys_total))
     gamma_l = params.gamma_l
     gamma_r = params.gamma_r
 
     d_sys = int(np.prod(d_sys_total))
     d_t = int(np.prod(d_t_total))
 
-    sm = sigma_minus()
     sp = sigma_plus()
-    pe = proj_excited()
+    sm = sigma_minus()
+    pe = proj_excited(d_sys)
+    I_t = np.eye(d_t, dtype=complex)
 
-    aL = a_l(d_t_total)
-    adagL = a_dag_l(d_t_total)
-    aR = a_r(d_t_total)
-    adagR = a_dag_r(d_t_total)
+    H_int_l = np.sqrt(gamma_l / delta_t) * (
+        np.kron(sm, a_dag_l(d_t_total)) + np.kron(sp, a_l(d_t_total))
+    )
+    H_int_r = np.sqrt(gamma_r / delta_t) * (
+        np.kron(sm, a_dag_r(d_t_total)) + np.kron(sp, a_r(d_t_total))
+    )
 
-    Ibin = np.eye(d_t, dtype=complex)
-
-    H_int_L = np.sqrt(gamma_l / delta_t) * (np.kron(sm, adagL) + np.kron(sp, aL))
-    H_int_R = np.sqrt(gamma_r / delta_t) * (np.kron(sm, adagR) + np.kron(sp, aR))
-
-    if isinstance(omega, np.ndarray):
-        omegas = np.asarray(omega, dtype=float)
+    if _is_array_drive(omega):
+        omega = np.asarray(omega, dtype=float)
 
         def hm_total(t_k: int) -> np.ndarray:
-            H_atom = delta * pe + 0.5 * omegas[t_k] * (sp + sm)
-            return np.kron(H_atom, Ibin) + H_int_L + H_int_R
+            H_sys = np.kron(delta * pe + 0.5 * omega[t_k] * (sp + sm), I_t)
+            return (H_sys + H_int_l + H_int_r) * delta_t
 
     else:
-        H_atom = delta * pe + 0.5 * float(omega) * (sp + sm)
-        hm_total = np.kron(H_atom, Ibin) + H_int_L + H_int_R
+        H_sys = np.kron(delta * pe + 0.5 * float(omega) * (sp + sm), I_t)
+        hm_total = (H_sys + H_int_l + H_int_r) * delta_t
 
-    return hm_total * delta_t
+    return hm_total
 
 
 def hamiltonian_1tls_feedback(
-    params: InputParams, omega: float | np.ndarray = 0, delta: float = 0
+    params: InputParams,
+    omega: float | np.ndarray = 0,
+    delta: float = 0,
 ) -> Hamiltonian:
     """
-    Hamiltonian for 1 two-level system in a semi-infinite waveguide with a side mirror (with feedback).
+    One TLS with feedback / semi-infinite waveguide.
 
-    The returned Hamiltonian includes:
-        - A classical pump term (omega) acting on the TLS, :math:`\\Omega(\\sigma^+ + \\sigma^-)`
-        - A detuning term for the TLS, :math:`\\delta |e\\rangle\\langle e|`.
-        - Interaction terms between the TLS and a single photonic mode (on the present and feedback bins).
+    Hilbert-space ordering:
+        [feedback_bin] ⊗ [system] ⊗ [current_bin]
 
-    Parameters
-    ----------
-    params : InputParams
-        Class containing the input parameters.
-        (It must include the phase)
+    Here each field bin is a single bosonic mode of dimension d_t,
+    i.e. params.d_t_total should correspond to one local bin dimension.
 
-    omega : float or np.ndarray, default: 0
-       Classical pump amplitude.
-       If a float is provided (CW pump) a single Hamiltonian ndarray is returned.
-       If a 1D np.ndarray is given (pulsed light), the
-       function returns a callable hm_total(t_k) that yields the Hamiltonian
-       at discrete time index t_k using omega[t_k].
-
-    delta : float, default: 0
-        Detuning between the pump and TLS transition frequency.
-
-    Returns
-    -------
-    Hamiltonian : np.ndarray | Callable[[int], np.ndarray]
-        Hamiltonian as a numpy.ndarray (time-independent drive) or a callable that
-        accepts a time index and returns the Hamiltonian (time-dependent drive).
+    Returns H * delta_t.
     """
     delta_t = params.delta_t
-    d_t_total = params.d_t_total
-    d_sys_total = params.d_sys_total
+    d_t_total = np.asarray(params.d_t_total, dtype=int)
+    d_sys_total = np.asarray(params.d_sys_total, dtype=int)
+
     gamma_l = params.gamma_l
     gamma_r = params.gamma_r
     phase = params.phase
 
-    d_t = np.prod(d_t_total)
-    d_sys = np.prod(d_sys_total)
-    t1 = np.sqrt(gamma_l) * np.kron(
-        np.kron(delta_b(delta_t, d_t) * np.exp(-1j * phase), sigmaplus()), np.eye(d_t)
-    )
-    t2 = np.sqrt(gamma_r) * np.kron(
-        np.kron(np.eye(d_t), sigmaplus()), delta_b(delta_t, d_t)
-    )
-    t3 = np.sqrt(gamma_l) * np.kron(
-        np.kron(delta_b_dag(delta_t, d_t) * np.exp(1j * phase), sigmaminus()),
-        np.eye(d_t),
-    )
-    t4 = np.sqrt(gamma_r) * np.kron(
-        np.kron(np.eye(d_t), sigmaminus()), delta_b_dag(delta_t, d_t)
-    )
-    if isinstance(omega, np.ndarray):
-        omegas = tuple(omega)
+    d_sys = int(np.prod(d_sys_total))
+    d_t = int(np.prod(d_t_total))
 
-        def hm_total(t_k):
-            hm_sys = (
-                omegas[t_k]
-                / 2
-                * delta_t
-                * (
-                    np.kron(np.kron(np.eye(d_t), sigmaplus()), np.eye(d_t))
-                    + np.kron(np.kron(np.eye(d_t), sigmaminus()), np.eye(d_t))
-                )
+    sp = sigma_plus()
+    sm = sigma_minus()
+    pe = proj_excited(d_sys)
+
+    I_t = np.eye(d_t, dtype=complex)
+
+    a_now = a(d_t)
+    adag_now = a_dag(d_t)
+
+    # ordering: [fb] ⊗ [sys] ⊗ [now]
+    H_fb = np.sqrt(gamma_l / delta_t) * (
+        np.kron(np.kron(a_now * np.exp(-1j * phase), sp), I_t)
+        + np.kron(np.kron(adag_now * np.exp(1j * phase), sm), I_t)
+    )
+
+    H_now = np.sqrt(gamma_r / delta_t) * (
+        np.kron(np.kron(I_t, sp), a_now) + np.kron(np.kron(I_t, sm), adag_now)
+    )
+
+    if _is_array_drive(omega):
+        omega = np.asarray(omega, dtype=float)
+
+        def hm_total(t_k: int) -> np.ndarray:
+            H_sys = np.kron(
+                np.kron(I_t, delta * pe + 0.5 * omega[t_k] * (sp + sm)),
+                I_t,
             )
-            hm = hm_sys + t1 + t2 + t3 + t4
-            return hm
+            return (H_sys + H_fb + H_now) * delta_t
+
     else:
-        hm_sys = (
-            omega
-            / 2
-            * delta_t
-            * (
-                np.kron(np.kron(np.eye(d_t), sigmaplus()), np.eye(d_t))
-                + np.kron(np.kron(np.eye(d_t), sigmaminus()), np.eye(d_t))
-            )
+        H_sys = np.kron(
+            np.kron(I_t, delta * pe + 0.5 * float(omega) * (sp + sm)),
+            I_t,
         )
-        hm_total = hm_sys + t1 + t2 + t3 + t4
+        hm_total = (H_sys + H_fb + H_now) * delta_t
+
     return hm_total
 
 
@@ -235,162 +153,84 @@ def hamiltonian_2tls_mar(
     delta2: float = 0,
 ) -> Hamiltonian:
     """
-    Hamiltonian for 2 two-level systems in an infinite waveguide in the Markovian regime.
-
-    The returned Hamiltonian includes:
-        - Classical pump terms (omega1/omega2) acting on TLS1/TLS2, :math:`\\Omega_i(\\sigma_i^+ + \\sigma_i^-)`
-        - A detuning term delta1/delta2 for TLS1/TLS2, :math:`\\delta_i |e\\rangle_i\\langle e|_i`.
-        - Interaction terms between the TLSs and left/right photonic modes.
-
-    Parameters
-    ----------
-    params : InputParams
-        Class containing the input parameters.
-
-    omega1 : float/np.ndarray, default: 0
-        Drive for two-level system 1
-        (can be a float for CW pumps or a time-dependent array for pulsed light).
-
-    delta1 : float, default: 0
-        Detuning for two-level system 1.
-
-    omega2 : float/np.ndarray, default: 0
-        Drive for two-level system 2
-        (can be a float for CW pumps or a time-dependent array for pulsed light).
-
-    delta2 : float, default: 0
-        Detuning for two-level system 1.
-
-    Returns
-    -------
-    Hamiltonian : np.ndarray | Callable[[int], np.ndarray]
-        Hamiltonian as a numpy.ndarray (time-independent drive) or a callable that
-        accepts a time index and returns the Hamiltonian (time-dependent drive).
+    Two TLSs + one bidirectional waveguide bin.
+    Hilbert-space ordering:
+        [sys1 ⊗ sys2] ⊗ [bin_LR]
+    Returns H * delta_t.
     """
-    delta_t, gamma_l1, gamma_r1, gamma_l2, gamma_r2, phase, d_sys_total, d_t_total = (
-        params.delta_t,
-        params.gamma_l,
-        params.gamma_r,
-        params.gamma_l2,
-        params.gamma_r2,
-        params.phase,
-        params.d_sys_total,
-        params.d_t_total,
+    delta_t = params.delta_t
+    gamma_l1 = params.gamma_l
+    gamma_r1 = params.gamma_r
+    gamma_l2 = params.gamma_l2
+    gamma_r2 = params.gamma_r2
+    phase = params.phase
+
+    d_sys_total = np.asarray(params.d_sys_total, dtype=int)
+    d_t_total = np.asarray(params.d_t_total, dtype=int)
+
+    d1 = int(d_sys_total[0])
+    d2 = int(d_sys_total[1])
+    d_t = int(np.prod(d_t_total))
+
+    I1 = np.eye(d1, dtype=complex)
+    I2 = np.eye(d2, dtype=complex)
+    I_t = np.eye(d_t, dtype=complex)
+
+    sp1 = np.kron(sigma_plus(), I2)
+    sm1 = np.kron(sigma_minus(), I2)
+    sp2 = np.kron(I1, sigma_plus())
+    sm2 = np.kron(I1, sigma_minus())
+
+    e1 = np.kron(proj_excited(d1), I2)
+    e2 = np.kron(I1, proj_excited(d2))
+
+    H_1r = np.sqrt(gamma_r1 / delta_t) * (
+        np.kron(sm1, a_dag_r(d_t_total)) + np.kron(sp1, a_r(d_t_total))
+    )
+    H_1l = np.sqrt(gamma_l1 / delta_t) * (
+        np.kron(sm1, a_dag_l(d_t_total) * np.exp(1j * phase))
+        + np.kron(sp1, a_l(d_t_total) * np.exp(-1j * phase))
+    )
+    H_2r = np.sqrt(gamma_r2 / delta_t) * (
+        np.kron(sm2, a_dag_r(d_t_total) * np.exp(1j * phase))
+        + np.kron(sp2, a_r(d_t_total) * np.exp(-1j * phase))
+    )
+    H_2l = np.sqrt(gamma_l2 / delta_t) * (
+        np.kron(sm2, a_dag_l(d_t_total)) + np.kron(sp2, a_l(d_t_total))
     )
 
-    d_sys1 = d_sys_total[0]
-    d_sys2 = d_sys_total[1]
-    d_t = np.prod(d_t_total)
+    def _sys_part(w1: float, w2: float) -> np.ndarray:
+        Hs = delta1 * e1 + delta2 * e2 + 0.5 * w1 * (sp1 + sm1) + 0.5 * w2 * (sp2 + sm2)
+        return np.kron(Hs, I_t)
 
-    sigmaplus1 = np.kron(sigmaplus(), np.eye(d_sys2))
-    sigmaminus1 = np.kron(sigmaminus(), np.eye(d_sys2))
-    sigmaplus2 = np.kron(np.eye(d_sys1), sigmaplus())
-    sigmaminus2 = np.kron(np.eye(d_sys1), sigmaminus())
-    e1 = np.kron(e(d_sys1), np.eye(d_sys2))
-    e2 = np.kron(np.eye(d_sys1), e(d_sys2))
+    if _is_array_drive(omega1) and _is_array_drive(omega2):
+        omega1 = np.asarray(omega1, dtype=float)
+        omega2 = np.asarray(omega2, dtype=float)
 
-    # interaction terms
-    t1R = np.sqrt(gamma_r1) * (
-        np.kron(sigmaminus1, delta_b_dag_r(delta_t, d_t_total))
-        + np.kron(sigmaplus1, delta_b_r(delta_t, d_t_total))
-    )
-    t1L = np.sqrt(gamma_l1) * (
-        np.kron(sigmaminus1, delta_b_dag_l(delta_t, d_t_total) * np.exp(1j * phase))
-        + np.kron(sigmaplus1, delta_b_l(delta_t, d_t_total) * np.exp(-1j * phase))
-    )
-    t2R = np.sqrt(gamma_r2) * (
-        np.kron(sigmaminus2, delta_b_dag_r(delta_t, d_t_total) * np.exp(1j * phase))
-        + np.kron(sigmaplus2, delta_b_r(delta_t, d_t_total) * np.exp(-1j * phase))
-    )
-    t2L = np.sqrt(gamma_l2) * (
-        np.kron(sigmaminus2, delta_b_dag_l(delta_t, d_t_total))
-        + np.kron(sigmaplus2, delta_b_l(delta_t, d_t_total))
-    )
+        def hm_total(t_k: int) -> np.ndarray:
+            return (
+                _sys_part(omega1[t_k], omega2[t_k]) + H_1r + H_1l + H_2r + H_2l
+            ) * delta_t
 
-    if isinstance(omega1, np.ndarray) and isinstance(omega2, np.ndarray):
-        omega1s = tuple(omega1)
-        omega2s = tuple(omega2)
-        hm_total = []
+    elif _is_array_drive(omega1):
+        omega1 = np.asarray(omega1, dtype=float)
+        w2 = float(omega2)
 
-        def hm_total(t_k):
-            hm_sys1 = (
-                delta_t
-                * omega1s[t_k]
-                / 2
-                * (np.kron(sigmaplus1, np.eye(d_t)) + np.kron(sigmaminus1, np.eye(d_t)))
-            )
-            +delta_t * delta1 * np.kron(e1, np.eye(d_t))
+        def hm_total(t_k: int) -> np.ndarray:
+            return (_sys_part(omega1[t_k], w2) + H_1r + H_1l + H_2r + H_2l) * delta_t
 
-            hm_sys2 = (
-                delta_t
-                * omega2s[t_k]
-                / 2
-                * (np.kron(sigmaplus2, np.eye(d_t)) + np.kron(sigmaminus2, np.eye(d_t)))
-            )
-            +delta_t * delta2 * np.kron(e2, np.eye(d_t))
+    elif _is_array_drive(omega2):
+        omega2 = np.asarray(omega2, dtype=float)
+        w1 = float(omega1)
 
-            return hm_sys1 + hm_sys2 + t1R + t1L + t2R + t2L
-
-    elif isinstance(omega1, np.ndarray):
-        omega1s = tuple(omega1)
-        hm_sys2 = (
-            delta_t
-            * omega2
-            / 2
-            * (np.kron(sigmaplus2, np.eye(d_t)) + np.kron(sigmaminus2, np.eye(d_t)))
-        )
-        +delta_t * delta2 * np.kron(e2, np.eye(d_t))
-
-        def hm_total(t_k):
-            hm_sys1 = (
-                delta_t
-                * omega1s[t_k]
-                / 2
-                * (np.kron(sigmaplus1, np.eye(d_t)) + np.kron(sigmaminus1, np.eye(d_t)))
-            )
-            +delta_t * delta1 * np.kron(e1, np.eye(d_t))
-
-            return hm_sys1 + hm_sys2 + t1R + t1L + t2R + t2L
-
-    elif isinstance(omega2, np.ndarray):
-        omega2s = tuple(omega2)
-        hm_sys1 = (
-            delta_t
-            * omega1
-            / 2
-            * (np.kron(sigmaplus1, np.eye(d_t)) + np.kron(sigmaminus1, np.eye(d_t)))
-        )
-        +delta_t * delta1 * np.kron(e1, np.eye(d_t))
-
-        def hm_total(t_k):
-            hm_sys2 = (
-                delta_t
-                * omega2s[t_k]
-                / 2
-                * (np.kron(sigmaplus2, np.eye(d_t)) + np.kron(sigmaminus2, np.eye(d_t)))
-            )
-            +delta_t * delta2 * np.kron(e2, np.eye(d_t))
-
-            return hm_sys1 + hm_sys2 + t1R + t1L + t2R + t2L
+        def hm_total(t_k: int) -> np.ndarray:
+            return (_sys_part(w1, omega2[t_k]) + H_1r + H_1l + H_2r + H_2l) * delta_t
 
     else:
-        hm_sys1 = (
-            delta_t
-            * omega1
-            / 2
-            * (np.kron(sigmaplus1, np.eye(d_t)) + np.kron(sigmaminus1, np.eye(d_t)))
-        )
-        +delta_t * delta1 * np.kron(e1, np.eye(d_t))
+        hm_total = (
+            _sys_part(float(omega1), float(omega2)) + H_1r + H_1l + H_2r + H_2l
+        ) * delta_t
 
-        hm_sys2 = (
-            delta_t
-            * omega2
-            / 2
-            * (np.kron(sigmaplus2, np.eye(d_t)) + np.kron(sigmaminus2, np.eye(d_t)))
-        )
-        +delta_t * delta2 * np.kron(e2, np.eye(d_t))
-
-        hm_total = hm_sys1 + hm_sys2 + t1R + t1L + t2R + t2L
     return hm_total
 
 
@@ -402,229 +242,87 @@ def hamiltonian_2tls_nmar(
     delta2: float = 0,
 ) -> Hamiltonian:
     """
-    Hamiltonian for 2 two-level systems in an infinite waveguide in the non-Markovian regime (feedback).
+    Two TLSs with non-Markovian feedback.
 
-    The returned Hamiltonian includes:
-        - Classical pump terms (omega1/omega2) acting on TLS1/TLS2, :math:`\\Omega_i(\\sigma_i^+ + \\sigma_i^-)`
-        - A detuning term delta1/delta2 for TLS1/TLS2, :math:`\\delta_i |e\\rangle_i\\langle e|_i`.
-        - Interaction terms between the two-level systems and left/right photonic modes (on the present and feedback bins).
+    Hilbert-space ordering:
+        [feedback_bin] ⊗ [sys1 ⊗ sys2] ⊗ [current_bin]
 
-    Parameters
-    ----------
-    params:InputParams
-        Class containing the input parameters.
-
-    omega1 : float/np.ndarray, default: 0
-        Drive for two-level system 1
-        (can be a float for CW pumps or a time-dependent array for pulsed light).
-
-    delta1 : float, default: 0
-        Detuning for two-level system 1.
-
-    omega2 : float/np.ndarray, default: 0
-        Drive for two-level system 2
-        (can be a float for CW pumps or a time-dependent array for pulsed light).
-
-    delta2 : float, default: 0
-        Detuning for two-level system 1.
-
-    Returns
-    -------
-    Hamiltonian : np.ndarray | Callable[[int], np.ndarray]
-        Hamiltonian as a numpy.ndarray (time-independent drive) or a callable that
-        accepts a time index and returns the Hamiltonian (time-dependent drive).
+    Returns H * delta_t.
     """
-    delta_t, gamma_l1, gamma_r1, gamma_l2, gamma_r2, phase, d_sys_total, d_t_total = (
-        params.delta_t,
-        params.gamma_l,
-        params.gamma_r,
-        params.gamma_l2,
-        params.gamma_r2,
-        params.phase,
-        params.d_sys_total,
-        params.d_t_total,
+    delta_t = params.delta_t
+    gamma_l1 = params.gamma_l
+    gamma_r1 = params.gamma_r
+    gamma_l2 = params.gamma_l2
+    gamma_r2 = params.gamma_r2
+    phase = params.phase
+
+    d_sys_total = np.asarray(params.d_sys_total, dtype=int)
+    d_t_total = np.asarray(params.d_t_total, dtype=int)
+
+    d1 = int(d_sys_total[0])
+    d2 = int(d_sys_total[1])
+    d_t = int(np.prod(d_t_total))
+
+    I1 = np.eye(d1, dtype=complex)
+    I2 = np.eye(d2, dtype=complex)
+    I_t = np.eye(d_t, dtype=complex)
+
+    sp1 = np.kron(sigma_plus(), I2)
+    sm1 = np.kron(sigma_minus(), I2)
+    sp2 = np.kron(I1, sigma_plus())
+    sm2 = np.kron(I1, sigma_minus())
+
+    e1 = np.kron(proj_excited(d1), I2)
+    e2 = np.kron(I1, proj_excited(d2))
+
+    a_bin = a(d_t)
+    adag_bin = a_dag(d_t)
+
+    H_11 = np.sqrt(gamma_l2 / delta_t) * (
+        np.kron(np.kron(I_t, sm2), adag_bin) + np.kron(np.kron(I_t, sp2), a_bin)
+    )
+    H_21 = np.sqrt(gamma_r2 / delta_t) * (
+        np.kron(np.kron(adag_bin * np.exp(1j * phase), sm2), I_t)
+        + np.kron(np.kron(a_bin * np.exp(-1j * phase), sp2), I_t)
+    )
+    H_12 = np.sqrt(gamma_l1 / delta_t) * (
+        np.kron(np.kron(adag_bin * np.exp(1j * phase), sm1), I_t)
+        + np.kron(np.kron(a_bin * np.exp(-1j * phase), sp1), I_t)
+    )
+    H_22 = np.sqrt(gamma_r1 / delta_t) * (
+        np.kron(np.kron(I_t, sm1), adag_bin) + np.kron(np.kron(I_t, sp1), a_bin)
     )
 
-    d_sys1 = d_sys_total[0]
-    d_sys2 = d_sys_total[1]
-    d_t = np.prod(d_t_total)
+    def _sys_part(w1: float, w2: float) -> np.ndarray:
+        Hs = delta1 * e1 + delta2 * e2 + 0.5 * w1 * (sp1 + sm1) + 0.5 * w2 * (sp2 + sm2)
+        return np.kron(np.kron(I_t, Hs), I_t)
 
-    sigmaplus1 = np.kron(sigmaplus(), np.eye(d_sys2))
-    sigmaminus1 = np.kron(sigmaminus(), np.eye(d_sys2))
-    sigmaplus2 = np.kron(np.eye(d_sys1), sigmaplus())
-    sigmaminus2 = np.kron(np.eye(d_sys1), sigmaminus())
-    e1 = np.kron(e(), np.eye(d_sys2))
-    e2 = np.kron(np.eye(d_sys1), e(d_sys2))
+    if _is_array_drive(omega1) and _is_array_drive(omega2):
+        omega1 = np.asarray(omega1, dtype=float)
+        omega2 = np.asarray(omega2, dtype=float)
 
-    # interaction terms
-    t11 = np.sqrt(gamma_l2) * np.kron(
-        np.kron(np.eye(d_t), sigmaminus2), delta_b_dag_l(delta_t, d_t_total)
-    )
-    t11hc = +np.sqrt(gamma_l2) * np.kron(
-        np.kron(np.eye(d_t), sigmaplus2), delta_b_l(delta_t, d_t_total)
-    )
-    t21 = np.sqrt(gamma_r2) * np.kron(
-        np.kron(delta_b_dag_r(delta_t, d_t_total) * np.exp(1j * phase), sigmaminus2),
-        np.eye(d_t),
-    )
-    t21hc = +np.sqrt(gamma_r2) * np.kron(
-        np.kron(delta_b_r(delta_t, d_t_total) * np.exp(-1j * phase), sigmaplus2),
-        np.eye(d_t),
-    )
-    t12 = np.sqrt(gamma_l1) * np.kron(
-        np.kron(delta_b_dag_l(delta_t, d_t_total) * np.exp(1j * phase), sigmaminus1),
-        np.eye(d_t),
-    )
-    t12hc = +np.sqrt(gamma_l1) * np.kron(
-        np.kron(delta_b_l(delta_t, d_t_total) * np.exp(-1j * phase), sigmaplus1),
-        np.eye(d_t),
-    )
-    t22 = np.sqrt(gamma_r1) * np.kron(
-        np.kron(np.eye(d_t), sigmaminus1), delta_b_dag_r(delta_t, d_t_total)
-    )
-    t22hc = +np.sqrt(gamma_r1) * np.kron(
-        np.kron(np.eye(d_t), sigmaplus1), delta_b_r(delta_t, d_t_total)
-    )
-
-    if isinstance(omega1, np.ndarray) and isinstance(omega2, np.ndarray):
-        omega1s = tuple(omega1)
-        omega2s = tuple(omega2)
-
-        def hm_total(t_k):
-            hm_sys1 = (
-                delta_t
-                * omega1s[t_k]
-                / 2
-                * (
-                    np.kron(np.kron(np.eye(d_t), sigmaplus1), np.eye(d_t))
-                    + np.kron(np.kron(np.eye(d_t), sigmaminus1), np.eye(d_t))
-                )
-            )
-            +delta_t * delta1 * np.kron(np.kron(np.eye(d_t), e1), np.eye(d_t))
-            hm_sys2 = (
-                delta_t
-                * omega2s[t_k]
-                / 2
-                * (
-                    np.kron(np.kron(np.eye(d_t), sigmaplus2), np.eye(d_t))
-                    + np.kron(np.kron(np.eye(d_t), sigmaminus2), np.eye(d_t))
-                )
-            )
-            +delta_t * delta2 * np.kron(np.kron(np.eye(d_t), e2), np.eye(d_t))
-
+        def hm_total(t_k: int) -> np.ndarray:
             return (
-                hm_sys1
-                + hm_sys2
-                + t11
-                + t11hc
-                + t21
-                + t21hc
-                + t12
-                + t12hc
-                + t22
-                + t22hc
-            )
+                _sys_part(omega1[t_k], omega2[t_k]) + H_11 + H_21 + H_12 + H_22
+            ) * delta_t
 
-    elif isinstance(omega1, np.ndarray):
-        omega1s = tuple(omega1)
-        hm_sys2 = (
-            delta_t
-            * omega2
-            / 2
-            * (
-                np.kron(np.kron(np.eye(d_t), sigmaplus2), np.eye(d_t))
-                + np.kron(np.kron(np.eye(d_t), sigmaminus2), np.eye(d_t))
-            )
-        )
-        +delta_t * delta2 * np.kron(np.kron(np.eye(d_t), e2), np.eye(d_t))
+    elif _is_array_drive(omega1):
+        omega1 = np.asarray(omega1, dtype=float)
+        w2 = float(omega2)
 
-        def hm_total(t_k):
-            hm_sys1 = (
-                delta_t
-                * omega1s[t_k]
-                / 2
-                * (
-                    np.kron(np.kron(np.eye(d_t), sigmaplus1), np.eye(d_t))
-                    + np.kron(np.kron(np.eye(d_t), sigmaminus1), np.eye(d_t))
-                )
-            )
-            +delta_t * delta1 * np.kron(np.kron(np.eye(d_t), e1), np.eye(d_t))
+        def hm_total(t_k: int) -> np.ndarray:
+            return (_sys_part(omega1[t_k], w2) + H_11 + H_21 + H_12 + H_22) * delta_t
 
-            return (
-                hm_sys1
-                + hm_sys2
-                + t11
-                + t11hc
-                + t21
-                + t21hc
-                + t12
-                + t12hc
-                + t22
-                + t22hc
-            )
+    elif _is_array_drive(omega2):
+        omega2 = np.asarray(omega2, dtype=float)
+        w1 = float(omega1)
 
-    elif isinstance(omega2, np.ndarray):
-        omega2s = tuple(omega2)
-        hm_sys1 = (
-            delta_t
-            * omega1
-            / 2
-            * (
-                np.kron(np.kron(np.eye(d_t), sigmaplus1), np.eye(d_t))
-                + np.kron(np.kron(np.eye(d_t), sigmaminus1), np.eye(d_t))
-            )
-        )
-        +delta_t * delta1 * np.kron(np.kron(np.eye(d_t), e1), np.eye(d_t))
-
-        def hm_total(t_k):
-            hm_sys2 = (
-                delta_t
-                * omega2s[t_k]
-                / 2
-                * (
-                    np.kron(np.kron(np.eye(d_t), sigmaplus2), np.eye(d_t))
-                    + np.kron(np.kron(np.eye(d_t), sigmaminus2), np.eye(d_t))
-                )
-            )
-            +delta_t * delta2 * np.kron(np.kron(np.eye(d_t), e2), np.eye(d_t))
-
-            return (
-                hm_sys1
-                + hm_sys2
-                + t11
-                + t11hc
-                + t21
-                + t21hc
-                + t12
-                + t12hc
-                + t22
-                + t22hc
-            )
+        def hm_total(t_k: int) -> np.ndarray:
+            return (_sys_part(w1, omega2[t_k]) + H_11 + H_21 + H_12 + H_22) * delta_t
 
     else:
-        hm_sys1 = (
-            delta_t
-            * omega1
-            / 2
-            * (
-                np.kron(np.kron(np.eye(d_t), sigmaplus1), np.eye(d_t))
-                + np.kron(np.kron(np.eye(d_t), sigmaminus1), np.eye(d_t))
-            )
-        )
-        +delta_t * delta1 * np.kron(np.kron(np.eye(d_t), e1), np.eye(d_t))
-
-        hm_sys2 = (
-            delta_t
-            * omega2
-            / 2
-            * (
-                np.kron(np.kron(np.eye(d_t), sigmaplus2), np.eye(d_t))
-                + np.kron(np.kron(np.eye(d_t), sigmaminus2), np.eye(d_t))
-            )
-        )
-        +delta_t * delta2 * np.kron(np.kron(np.eye(d_t), e2), np.eye(d_t))
-
         hm_total = (
-            hm_sys1 + hm_sys2 + t11 + t11hc + t21 + t21hc + t12 + t12hc + t22 + t22hc
-        )
+            _sys_part(float(omega1), float(omega2)) + H_11 + H_21 + H_12 + H_22
+        ) * delta_t
+
     return hm_total
