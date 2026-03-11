@@ -100,8 +100,9 @@ def t_evol_mar_seemps(
 
     system_states = [psi_sys.copy()]
 
-    # Initial bin entry (for time alignment with the simulation grid)
-    initial_bin = np.asarray(i_n0, dtype=complex)
+    # Initial field entries are aligned with t = 0, before the first input bin
+    # has interacted with the system.
+    initial_bin = states.wg_ground(d_bin)
     output_field_states = [initial_bin.copy()]
     input_field_states = [initial_bin.copy()]
     correlation_bins = [initial_bin.copy()]
@@ -385,7 +386,8 @@ def t_evol_nmar_seemps(
 
                 delay_line[j] = right_bin
 
-            schmidt_tau.append(_schmidt_weights(current_feedback)[: params.bond_max])
+            w_tau = _schmidt_weights(current_feedback)
+            schmidt_tau.append(np.sqrt(np.maximum(w_tau, 0.0))[: params.bond_max])
             bond_dims_tau.append(int(current_feedback.shape[2]))
 
             correlation_tensor, delayed_bin, _ = _left_orth_2site(

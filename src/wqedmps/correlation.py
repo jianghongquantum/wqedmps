@@ -799,9 +799,7 @@ def correlations_2t(
 
     time_bin_list_copy = list(correlation_bins)
 
-    # Resize two_time_ops if needed
-    for i in range(len(ops_two_time)):
-        ops_two_time[i] = ops_two_time[i].reshape((d_t,) * (2 * 2))
+    ops_two_time = [np.asarray(op).reshape((d_t,) * 4) for op in ops_two_time]
 
     correlations = np.array(
         [
@@ -923,11 +921,7 @@ def correlations_1t(
 
     time_bin_list_copy = list(correlation_bins)
 
-    # Resize two_time_ops if needed
-    for i in range(len(ops_two_time)):
-        ops_two_time[i] = ops_two_time[i].reshape(
-            (d_t,) * (2 * 2)
-        )  # One for factor for bin number, 2 point
+    ops_two_time = [np.asarray(op).reshape((d_t,) * 4) for op in ops_two_time]
 
     # Truncate to steady state index and create appropriate
     size = len(time_bin_list_copy)
@@ -1145,11 +1139,7 @@ def correlation_ss_1t(
 
     time_bin_list_copy = list(correlation_bins)
 
-    # Resize two_time_ops if needed
-    for i in range(len(ops_two_time)):
-        ops_two_time[i] = ops_two_time[i].reshape(
-            (d_t,) * (2 * 2)
-        )  # One for factor for bin number, 2 point
+    ops_two_time = [np.asarray(op).reshape((d_t,) * 4) for op in ops_two_time]
 
     # First check convergence of all correlations if not given a time:
     if t_steady is None:
