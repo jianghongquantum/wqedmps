@@ -15,13 +15,14 @@ from dataclasses import dataclass
 import numpy as np
 
 from wqedlib import states as states
+from wqedlib.mps_tools import strategy_from_params
 from collections.abc import Iterator
 from wqedlib.parameters import InputParams, Bins
 from typing import Callable, TypeAlias
 from wqedlib.hamiltonians import Hamiltonian
 from wqedlib.operators import *
 from wqedlib.operators import u_evol, swap_gate
-from seemps.state import CanonicalMPS, DEFAULT_STRATEGY
+from seemps.state import CanonicalMPS
 
 __all__ = ["t_evol_mar_seemps", "t_evol_nmar_seemps", "BinsSeemps", "BinsSeempsNMar"]
 
@@ -126,10 +127,7 @@ def t_evol_mar_seemps(
     d_sys = int(np.prod(params.d_sys_total))
     d_bin = int(np.prod(params.d_t_total))
 
-    strategy = DEFAULT_STRATEGY.replace(
-        tolerance=getattr(params, "atol", 1e-12),
-        max_bond_dimension=params.bond_max,
-    )
+    strategy = strategy_from_params(params)
 
     swap_sys_bin = swap_gate(d_sys, d_bin)
     times = np.arange(n_steps + 1) * delta_t
@@ -350,10 +348,7 @@ def t_evol_nmar_seemps(
     d_sys = int(np.prod(params.d_sys_total))
     d_bin = int(np.prod(params.d_t_total))
 
-    strategy = DEFAULT_STRATEGY.replace(
-        tolerance=getattr(params, "atol", 1e-12),
-        max_bond_dimension=params.bond_max,
-    )
+    strategy = strategy_from_params(params)
 
     swap_sys_bin = swap_gate(d_sys, d_bin)
     swap_bin_bin = swap_gate(d_bin, d_bin)

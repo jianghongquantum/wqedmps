@@ -3,8 +3,8 @@ from collections.abc import Iterator
 import numpy as np
 import scipy as sci
 
+from .mps_tools import pair_tensor, split_pair_left, strategy_from_params
 from .parameters import InputParams
-from seemps.state import CanonicalMPS, DEFAULT_STRATEGY
 
 """
 States and input field utilities for waveguide-QED MPS simulations.
@@ -36,32 +36,6 @@ __all__ = [
     "normalize_pulse_envelope",
     "fock_pulse",
 ]
-
-
-def _pair_tensor(left: np.ndarray, right: np.ndarray) -> np.ndarray:
-    """
-    Merge two neighboring MPS tensors with the shared bond contracted.
-    """
-    return np.einsum("aib,bjc->aijc", left, right, optimize=True)
-
-
-def _split_pair_left(
-    theta: np.ndarray,
-    left: np.ndarray,
-    right: np.ndarray,
-    strategy,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Split a two-site tensor and keep the orthogonality center on the left site.
-    """
-    mps_pair = CanonicalMPS(
-        [np.array(left, copy=True), np.array(right, copy=True)],
-        center=0,
-        normalize=False,
-    )
-    mps_pair.update_2site_left(theta, 0, strategy)
-    return np.array(mps_pair[0], copy=True), np.array(mps_pair[1], copy=True)
-
 
 # ============================================================
 # Local basis states
@@ -369,10 +343,7 @@ def _fock_pulse(
 
     delta_t = params.delta_t
     d_t_total = params.d_t_total
-    strategy = DEFAULT_STRATEGY.replace(
-        tolerance=getattr(params, "atol", 1e-12),
-        max_bond_dimension=params.bond_max,
-    )
+    strategy = strategy_from_params(params)
 
     m = int(round(pulse_time / delta_t))
 
@@ -451,21 +422,21 @@ def _fock_pulse(
     tensors = []
     left_factor = calc_ak(pulse_envs[m - 2])
     right_factor = am
-    curr = _pair_tensor(left_factor, right_factor)
+    curr = pair_tensor(left_factor, right_factor)
 
     for k in range(m - 2, 1, -1):
-        curr_left, right = _split_pair_left(curr, left_factor, right_factor, strategy)
+        curr_left, right = split_pair_left(curr, left_factor, right_factor, strategy)
         tensors.append(right)
 
         left_factor = calc_ak(pulse_envs[k - 1])
         right_factor = curr_left
-        curr = _pair_tensor(left_factor, right_factor)
+        curr = pair_tensor(left_factor, right_factor)
 
-    curr_left, right = _split_pair_left(curr, left_factor, right_factor, strategy)
+    curr_left, right = split_pair_left(curr, left_factor, right_factor, strategy)
     tensors.append(right)
 
-    curr = _pair_tensor(a1, curr_left)
-    left, right = _split_pair_left(curr, a1, curr_left, strategy)
+    curr = pair_tensor(a1, curr_left)
+    left, right = split_pair_left(curr, a1, curr_left, strategy)
 
     tensors.append(right)
     tensors.append(left)
