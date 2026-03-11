@@ -16,11 +16,17 @@ import numpy as np
 
 from seemps.state.schmidt import _left_orth_2site, _right_orth_2site, _schmidt_weights
 from wqedmps import states as states
-from wqedmps.mps_tools import contract_cached, pair_tensor, strategy_from_params
+from wqedmps.mps_tools import (
+    contract_cached,
+    pair_tensor,
+    strategy_from_params,
+    swap_pair_tensor,
+    swap_theta,
+)
 from wqedmps.parameters import InputParams
 from wqedmps.hamiltonians import Hamiltonian
 from wqedmps.operators import *
-from wqedmps.operators import u_evol, swap_gate
+from wqedmps.operators import u_evol
 
 __all__ = ["t_evol_mar_seemps", "t_evol_nmar_seemps", "BinsSeemps", "BinsSeempsNMar"]
 
@@ -127,7 +133,6 @@ def t_evol_mar_seemps(
 
     strategy = strategy_from_params(params)
 
-    swap_sys_bin = swap_gate(d_sys, d_bin)
     times = np.arange(n_steps + 1) * delta_t
 
     # Input field generator:
@@ -188,8 +193,7 @@ def t_evol_mar_seemps(
         # Resulting pair:
         #   [output_bin | updated_system]
         # --------------------------------------------------------
-        theta = pair_tensor(system_left, input_bin_after_interaction)
-        theta = contract_cached("pqij,aijb->apqb", swap_sys_bin, theta)
+        theta = swap_theta(pair_tensor(system_left, input_bin_after_interaction))
         theta_centered_on_output = theta.copy()
 
         correlation_tensor, system_tensor, _ = _left_orth_2site(theta, strategy)
@@ -333,9 +337,6 @@ def t_evol_nmar_seemps(
 
     strategy = strategy_from_params(params)
 
-    swap_sys_bin = swap_gate(d_sys, d_bin)
-    swap_bin_bin = swap_gate(d_bin, d_bin)
-
     times = np.arange(n_steps + 1) * delta_t
 
     # Input field generator: first i_n0 then vacuum bins
@@ -387,13 +388,7 @@ def t_evol_nmar_seemps(
 
         for j in range(step, step + delay_steps - 1):
             next_bin = delay_line[j + 1]
-
-            theta = contract_cached(
-                "aic,cjd,pqij->apqd",
-                feedback_bin,
-                next_bin,
-                swap_bin_bin,
-            )
+            theta = swap_pair_tensor(feedback_bin, next_bin)
 
             left_bin, right_bin, _ = _left_orth_2site(theta, strategy)
             delay_line[j] = left_bin
@@ -446,12 +441,7 @@ def t_evol_nmar_seemps(
         # --------------------------------------------------------
         # 7. Swap [system | loop] → [loop | system]
         # --------------------------------------------------------
-        theta = contract_cached(
-            "aic,cjd,pqij->apqd",
-            system_tensor_centered,
-            loop_bin,
-            swap_sys_bin,
-        )
+        theta = swap_pair_tensor(system_tensor_centered, loop_bin)
 
         loop_bin_centered, system_tensor, _ = _right_orth_2site(theta, strategy)
 
@@ -493,13 +483,7 @@ def t_evol_nmar_seemps(
 
             for j in range(step + delay_steps - 1, step, -1):
                 prev_bin = delay_line[j - 1]
-
-                theta = contract_cached(
-                    "aic,cjd,pqij->apqd",
-                    prev_bin,
-                    current_feedback,
-                    swap_bin_bin,
-                )
+                theta = swap_pair_tensor(prev_bin, current_feedback)
 
                 theta_centered_on_delay = theta.copy()
                 current_feedback, right_bin, _ = _right_orth_2site(theta, strategy)

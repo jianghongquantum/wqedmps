@@ -13,6 +13,7 @@ from .parameters import InputParams
 __all__ = [
     "contract_cached",
     "pair_tensor",
+    "swap_theta",
     "swap_pair_tensor",
     "local_density_matrix",
     "split_pair_left",
@@ -52,13 +53,23 @@ def pair_tensor(left: np.ndarray, right: np.ndarray) -> np.ndarray:
     return merged.reshape(left.shape[0], left.shape[1], right.shape[1], right.shape[2])
 
 
+def swap_theta(theta: np.ndarray) -> np.ndarray:
+    """
+    Apply a nearest-neighbor SWAP by exchanging the two physical axes.
+    """
+    if theta.ndim != 4:
+        raise ValueError(f"swap_theta expects a rank-4 tensor, got shape {theta.shape}")
+    return theta.transpose(0, 2, 1, 3)
+
+
 def swap_pair_tensor(
-    left: np.ndarray, right: np.ndarray, swap: np.ndarray
+    left: np.ndarray, right: np.ndarray, swap: np.ndarray | None = None
 ) -> np.ndarray:
     """
-    Contract two neighboring MPS tensors with a rank-4 SWAP gate.
+    Apply a nearest-neighbor SWAP to two neighboring MPS tensors.
     """
-    return contract_cached("aib,bjc,xyij->axyc", left, right, swap)
+    del swap
+    return swap_theta(pair_tensor(left, right))
 
 
 def local_density_matrix(state: np.ndarray) -> np.ndarray:

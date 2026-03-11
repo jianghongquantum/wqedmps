@@ -20,7 +20,6 @@ from wqedmps.operators import (
     op_list_check,
     expectation_1bin,
     expectation_nbins,
-    swap_gate,
     single_time_expectation,
 )
 from wqedmps.parameters import InputParams
@@ -795,7 +794,6 @@ def correlations_2t(
     strategy = strategy_from_params(params)
 
     time_bin_list_copy = list(correlation_bins)
-    swap_gate_matrix = swap_gate(d_t, d_t)
 
     # Resize two_time_ops if needed
     for i in range(len(ops_two_time)):
@@ -839,7 +837,7 @@ def correlations_2t(
                 )  # this means I'm storing [t,tau]
 
             swap_gateped_tensor = swap_pair_tensor(
-                i_1, i_2, swap_gate_matrix
+                i_1, i_2
             )  # swap_gateping the time bin down the line
             i_t2, i_1 = split_pair_right(swap_gateped_tensor, strategy)
 
@@ -855,7 +853,7 @@ def correlations_2t(
         # after the last value of the column we bring back the first time
         for j in range(len(time_bin_list_copy) - 1, 0, -1):
             swap_gateped_tensor = swap_pair_tensor(
-                time_bin_list_copy[j - 1], time_bin_list_copy[j], swap_gate_matrix
+                time_bin_list_copy[j - 1], time_bin_list_copy[j]
             )
             returning_bin, right_bin = split_pair_left(swap_gateped_tensor, strategy)
             if j > 1:
@@ -923,7 +921,6 @@ def correlations_1t(
     t_index = int(round(t / delta_t, 0))
 
     time_bin_list_copy = list(correlation_bins)
-    swap_gate_matrix = swap_gate(d_t, d_t)
 
     # Resize two_time_ops if needed
     for i in range(len(ops_two_time)):
@@ -944,9 +941,7 @@ def correlations_1t(
 
     # swap_gate bin the t_index bin backwards from t_index -> 0, with the OC
     for i in range(t_index, 0, -1):
-        bin_contraction = swap_pair_tensor(
-            time_bin_list_copy[i - 1], time_bin_list_copy[i], swap_gate_matrix
-        )
+        bin_contraction = swap_pair_tensor(time_bin_list_copy[i - 1], time_bin_list_copy[i])
         left_bin, right_bin = split_pair_left(bin_contraction, strategy)
         time_bin_list_copy[i] = right_bin  # right normalized system bin
         time_bin_list_copy[i - 1] = left_bin  # OC on left bin
@@ -961,7 +956,7 @@ def correlations_1t(
         for j in range(len(ops_two_time)):
             correlations[j][i] = expectation_nbins(state, ops_two_time[j])
 
-        swap_gates = swap_pair_tensor(i_1, i_2, swap_gate_matrix)
+        swap_gates = swap_pair_tensor(i_1, i_2)
         _, i_t2 = split_pair_right(swap_gates, strategy)
 
         # Now put OC in the right bin, i_t2, to move it up the chain
@@ -1146,7 +1141,6 @@ def correlation_ss_1t(
     strategy = strategy_from_params(params)
 
     time_bin_list_copy = list(correlation_bins)
-    swap_gate_matrix = swap_gate(d_t, d_t)
 
     # Resize two_time_ops if needed
     for i in range(len(ops_two_time)):
@@ -1190,7 +1184,7 @@ def correlation_ss_1t(
         for j in range(len(ops_two_time)):
             correlations[j][i] = expectation_nbins(state, ops_two_time[j])
 
-        swap_gates = swap_pair_tensor(i_1, i_2, swap_gate_matrix)
+        swap_gates = swap_pair_tensor(i_1, i_2)
         _, i_t2 = split_pair_right(swap_gates, strategy)
 
         # Now put OC in the right bin, i_t2, to move it up the chain
