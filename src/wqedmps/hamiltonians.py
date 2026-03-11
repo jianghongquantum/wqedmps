@@ -6,7 +6,7 @@ from __future__ import annotations
 import numpy as np
 from typing import Callable, TypeAlias
 
-from wqedlib.operators import (
+from wqedmps.operators import (
     sigma_plus,
     sigma_minus,
     proj_excited,
@@ -17,7 +17,7 @@ from wqedlib.operators import (
     a_dag_l,
     a_dag_r,
 )
-from wqedlib.parameters import InputParams
+from wqedmps.parameters import InputParams
 
 Hamiltonian: TypeAlias = np.ndarray | Callable[[int], np.ndarray]
 

@@ -8,12 +8,29 @@ version = "0.1.0"
 description = "Waveguide QED tools"
 readme = "README.md"
 requires-python = ">=3.13"
+license = "MIT"
+authors = [
+    { name = "jianghongquinfog", email = "xhungchiang@gmail.com" },
+]
+keywords = ["waveguide-qed", "mps", "tensor-network", "quantum-optics"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Physics",
+]
 dependencies = [
     "matplotlib>=3.10.7",
     "numpy>=2.4.2",
     "scipy>=1.17.1",
     "seemps @ git+https://github.com/juanjosegarciaripoll/seemps2.git",
 ]
+
+[project.urls]
+Homepage = "https://github.com/jianghongquantum/wqedmps"
+Repository = "https://github.com/jianghongquantum/wqedmps"
+Issues = "https://github.com/jianghongquantum/wqedmps/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -29,6 +46,9 @@ dev = [
     "scipy-stubs>=1.16.3.0",
 ]
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["wqedlib*"]
+where = ["src"]
+include = ["wqedmps*"]

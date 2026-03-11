@@ -14,14 +14,14 @@ calculations (populations, correlations, spectra and entanglement).
 from dataclasses import dataclass
 import numpy as np
 
-from wqedlib import states as states
-from wqedlib.mps_tools import strategy_from_params
+from wqedmps import states as states
+from wqedmps.mps_tools import strategy_from_params
 from collections.abc import Iterator
-from wqedlib.parameters import InputParams, Bins
+from wqedmps.parameters import InputParams, Bins
 from typing import Callable, TypeAlias
-from wqedlib.hamiltonians import Hamiltonian
-from wqedlib.operators import *
-from wqedlib.operators import u_evol, swap_gate
+from wqedmps.hamiltonians import Hamiltonian
+from wqedmps.operators import *
+from wqedmps.operators import u_evol, swap_gate
 from seemps.state import CanonicalMPS
 
 __all__ = ["t_evol_mar_seemps", "t_evol_nmar_seemps", "BinsSeemps", "BinsSeempsNMar"]

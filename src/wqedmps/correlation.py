@@ -10,7 +10,7 @@ of a two time correlation function, steady state correlation functions, and spec
 import numpy as np
 import copy
 
-from wqedlib.mps_tools import (
+from wqedmps.mps_tools import (
     local_density_matrix,
     pair_tensor,
     split_pair_left,
@@ -18,14 +18,14 @@ from wqedlib.mps_tools import (
     strategy_from_params,
     swap_pair_tensor,
 )
-from wqedlib.operators import (
+from wqedmps.operators import (
     op_list_check,
     expectation_1bin,
     expectation_nbins,
     swap_gate,
     single_time_expectation,
 )
-from wqedlib.parameters import InputParams
+from wqedmps.parameters import InputParams
 
 __all__ = [
     "spectrum_w",

@@ -1,11 +1,11 @@
 
 # wqedmps
 
-`wqedmps` is a Python package for waveguide QED simulations based on matrix-product-state tools.
+`wqedmps` provides waveguide-QED simulation tools built around matrix-product-state methods.
 
-## Install
+## Installation
 
-Editable install from the repository root:
+Install from a local checkout:
 
 ```bash
 python -m pip install -e .
@@ -17,17 +17,40 @@ Install with development dependencies:
 python -m pip install -e ".[dev]"
 ```
 
-If you use `uv`, the equivalent commands are:
+If you use `uv`:
 
 ```bash
 uv sync
-uv pip install -e .
 ```
 
-## Use
+Install directly from GitHub in another project:
+
+```bash
+uv add git+https://github.com/jianghongquantum/wqedmps.git
+```
+
+## Quick Start
 
 ```python
-from wqedlib import InputParams
+from wqedmps import InputParams
+
+params = InputParams(
+    delta_t=0.1,
+    tmax=1.0,
+    d_sys_total=[2],
+    d_t_total=[2],
+    bond_max=16,
+    gamma_l=0.0,
+    gamma_r=1.0,
+)
 ```
 
-The importable package lives in `wqedlib/`.
+## Development
+
+The source package lives in `src/wqedmps/`.
+
+Build distributable artifacts with:
+
+```bash
+uv build
+```
