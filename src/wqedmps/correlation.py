@@ -8,8 +8,6 @@ of a two time correlation function, steady state correlation functions, and spec
 """
 
 import numpy as np
-import copy
-
 from wqedmps.mps_tools import (
     local_density_matrix,
     pair_tensor,
@@ -157,7 +155,7 @@ def spectral_intensity(
     """
     delta_t = input_params.delta_t
 
-    correlation_matrix_copy = copy.deepcopy(correlation_matrix)
+    correlation_matrix_copy = np.array(correlation_matrix, copy=True)
     # Taper end of signal if using filter
     if hanning_filter:
         taper_window = np.hanning(2 * taper_length)[taper_length:]
@@ -217,7 +215,7 @@ def time_dependent_spectrum(
         List of frequencies associated with the calculated time dependent spectrum.
     """
     delta_t = input_params.delta_t
-    correlation_matrix_copy = copy.deepcopy(correlation_matrix)
+    correlation_matrix_copy = np.array(correlation_matrix, copy=True)
     size = correlation_matrix_copy.shape[0]
 
     if w_list is None:
@@ -227,12 +225,12 @@ def time_dependent_spectrum(
     spectrum = np.zeros((size, len(w_list)), dtype=np.complex128)
 
     # Try to use numpy numerical integration over rank 3 tensor created: [t'][t''][omega]
-    integration_elements = (
+    integration_elements = np.array(
         np.broadcast_to(
             correlation_matrix_copy, (len(w_list), *correlation_matrix_copy.shape)
-        )
-        .astype(np.complex128)
-        .copy()
+        ),
+        dtype=np.complex128,
+        copy=True,
     )  # Puts omega index first
 
     # Calculate phase factors, store result as [omega, t', tau]
@@ -796,7 +794,7 @@ def correlations_2t(
     d_t = np.prod(d_t_total)
     strategy = strategy_from_params(params)
 
-    time_bin_list_copy = copy.deepcopy(correlation_bins)
+    time_bin_list_copy = list(correlation_bins)
     swap_gate_matrix = swap_gate(d_t, d_t)
 
     # Resize two_time_ops if needed
@@ -924,9 +922,7 @@ def correlations_1t(
 
     t_index = int(round(t / delta_t, 0))
 
-    time_bin_list_copy = copy.deepcopy(
-        correlation_bins
-    )  # Work on deep copy to not risk altering initial
+    time_bin_list_copy = list(correlation_bins)
     swap_gate_matrix = swap_gate(d_t, d_t)
 
     # Resize two_time_ops if needed
@@ -1149,9 +1145,7 @@ def correlation_ss_1t(
     d_t = np.prod(d_t_total)
     strategy = strategy_from_params(params)
 
-    time_bin_list_copy = copy.deepcopy(
-        correlation_bins
-    )  # Work on deep copy to not risk altering initial
+    time_bin_list_copy = list(correlation_bins)
     swap_gate_matrix = swap_gate(d_t, d_t)
 
     # Resize two_time_ops if needed

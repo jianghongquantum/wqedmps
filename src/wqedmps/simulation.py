@@ -197,7 +197,7 @@ def t_evol_mar_seemps(
         # --------------------------------------------------------
         # Schmidt values across the active cut
         # --------------------------------------------------------
-        w = np.array(_schmidt_weights(system_tensor), copy=True)
+        w = _schmidt_weights(system_tensor)
         s = np.sqrt(np.maximum(w, 0.0))
         schmidt.append(s[: params.bond_max])
         bond_dims.append(int(correlation_tensor.shape[2]))
@@ -383,10 +383,10 @@ def t_evol_nmar_seemps(
         # --------------------------------------------------------
         # 1. Bring delayed feedback bin next to system
         # --------------------------------------------------------
-        feedback_bin = delay_line[step].copy()
+        feedback_bin = delay_line[step]
 
         for j in range(step, step + delay_steps - 1):
-            next_bin = delay_line[j + 1].copy()
+            next_bin = delay_line[j + 1]
 
             theta = contract_cached(
                 "aic,cjd,pqij->apqd",
@@ -396,16 +396,14 @@ def t_evol_nmar_seemps(
             )
 
             left_bin, right_bin, _ = _left_orth_2site(theta, strategy)
-            delay_line[j] = np.array(left_bin, copy=True)
-            feedback_bin = np.array(right_bin, copy=True)
+            delay_line[j] = left_bin
+            feedback_bin = right_bin
 
         # --------------------------------------------------------
         # 2. Combine [feedback | system]
         # --------------------------------------------------------
         theta = pair_tensor(feedback_bin, system_tensor)
         feedback_left, system_tensor, _ = _left_orth_2site(theta, strategy)
-        feedback_left = np.array(feedback_left, copy=True)
-        system_tensor = np.array(system_tensor, copy=True)
 
         # --------------------------------------------------------
         # 3. Read current input bin
@@ -415,8 +413,6 @@ def t_evol_nmar_seemps(
         # store with center on bin
         theta_in = pair_tensor(system_tensor, input_bin)
         system_left, input_bin_oc, _ = _left_orth_2site(theta_in, strategy)
-        system_left = np.array(system_left, copy=True)
-        input_bin_oc = np.array(input_bin_oc, copy=True)
 
         input_field_states.append(input_bin_oc)
 
@@ -437,8 +433,6 @@ def t_evol_nmar_seemps(
         theta = theta.reshape(theta.shape[0], d_bin, d_sys * d_bin, theta.shape[-1])
 
         feedback_left_new, rest_oc, _ = _left_orth_2site(theta, strategy)
-        feedback_left_new = np.array(feedback_left_new, copy=True)
-        rest_oc = np.array(rest_oc, copy=True)
 
         # --------------------------------------------------------
         # 6. Split [system | loop]
@@ -446,8 +440,6 @@ def t_evol_nmar_seemps(
         theta = rest_oc.reshape(rest_oc.shape[0], d_sys, d_bin, rest_oc.shape[-1])
 
         system_tensor_centered, loop_bin, _ = _right_orth_2site(theta, strategy)
-        system_tensor_centered = np.array(system_tensor_centered, copy=True)
-        loop_bin = np.array(loop_bin, copy=True)
 
         system_states.append(system_tensor_centered)
 
@@ -462,8 +454,6 @@ def t_evol_nmar_seemps(
         )
 
         loop_bin_centered, system_tensor, _ = _right_orth_2site(theta, strategy)
-        loop_bin_centered = np.array(loop_bin_centered, copy=True)
-        system_tensor = np.array(system_tensor, copy=True)
 
         # --------------------------------------------------------
         # 8. Attach loop bin to feedback branch
@@ -472,10 +462,8 @@ def t_evol_nmar_seemps(
 
         theta_centered_on_feedback = theta.copy()
         feedback_left_mid, loop_bin_oc, _ = _left_orth_2site(theta, strategy)
-        feedback_left_mid = np.array(feedback_left_mid, copy=True)
-        loop_bin_oc = np.array(loop_bin_oc, copy=True)
 
-        w_fb = np.array(_schmidt_weights(loop_bin_oc), copy=True)
+        w_fb = _schmidt_weights(loop_bin_oc)
         schmidt.append(np.sqrt(np.maximum(w_fb, 0))[: params.bond_max])
         bond_dims.append(int(feedback_left_mid.shape[2]))
 
@@ -483,8 +471,6 @@ def t_evol_nmar_seemps(
         feedback_bin_centered, loop_bin_internal, _ = _right_orth_2site(
             theta_centered_on_feedback, strategy
         )
-        feedback_bin_centered = np.array(feedback_bin_centered, copy=True)
-        loop_bin_internal = np.array(loop_bin_internal, copy=True)
 
         output_field_states.append(feedback_bin_centered)
         loop_field_states.append(loop_bin_oc)
@@ -498,15 +484,15 @@ def t_evol_nmar_seemps(
         if delay_steps == 1:
             schmidt_tau.append(np.array([1.0]))
             bond_dims_tau.append(1)
-            correlation_bins.append(feedback_left_mid.copy())
-            last_feedback_center = feedback_bin_centered.copy()
+            correlation_bins.append(feedback_left_mid)
+            last_feedback_center = feedback_bin_centered
 
         else:
-            current_feedback = feedback_bin_centered.copy()
+            current_feedback = feedback_bin_centered
             right_bin = None
 
             for j in range(step + delay_steps - 1, step, -1):
-                prev_bin = delay_line[j - 1].copy()
+                prev_bin = delay_line[j - 1]
 
                 theta = contract_cached(
                     "aic,cjd,pqij->apqd",
@@ -517,10 +503,8 @@ def t_evol_nmar_seemps(
 
                 theta_centered_on_delay = theta.copy()
                 current_feedback, right_bin, _ = _right_orth_2site(theta, strategy)
-                current_feedback = np.array(current_feedback, copy=True)
-                right_bin = np.array(right_bin, copy=True)
 
-                delay_line[j] = right_bin.copy()
+                delay_line[j] = right_bin
 
             schmidt_tau.append(
                 np.array(_schmidt_weights(current_feedback))[: params.bond_max]
@@ -530,15 +514,15 @@ def t_evol_nmar_seemps(
             correlation_tensor, delayed_bin, _ = _left_orth_2site(
                 theta_centered_on_delay, strategy
             )
-            delay_line[step + 1] = np.array(delayed_bin, copy=True)
-            correlation_bins.append(np.array(correlation_tensor, copy=True))
-            last_feedback_center = current_feedback.copy()
+            delay_line[step + 1] = delayed_bin
+            correlation_bins.append(correlation_tensor)
+            last_feedback_center = current_feedback
 
     # ------------------------------------------------------------
     # Replace last correlation tensor
     # ------------------------------------------------------------
     if n_steps > 0 and last_feedback_center is not None:
-        correlation_bins[-1] = last_feedback_center.copy()
+        correlation_bins[-1] = last_feedback_center
 
     return BinsSeempsNMar(
         system_states=system_states,
