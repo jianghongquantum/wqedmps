@@ -23,6 +23,7 @@ classifiers = [
 dependencies = [
     "matplotlib>=3.10.7",
     "numpy>=2.4.2",
+    "opt-einsum>=3.4.0",
     "scipy>=1.17.1",
     "seemps @ git+https://github.com/juanjosegarciaripoll/seemps2.git",
 ]

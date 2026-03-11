@@ -15,7 +15,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from wqedmps import states as states
-from wqedmps.mps_tools import strategy_from_params
+from wqedmps.mps_tools import contract_cached, strategy_from_params
 from collections.abc import Iterator
 from wqedmps.parameters import InputParams, Bins
 from typing import Callable, TypeAlias
@@ -197,7 +197,7 @@ def t_evol_mar_seemps(
         # System–bin interaction
         # --------------------------------------------------------
         # psi = np.tensordot(mps_pair[0], mps_pair[1], axes=(2, 0))
-        theta = np.einsum("pqij,aijb->apqb", U_int, theta, optimize=True)
+        theta = contract_cached("pqij,aijb->apqb", U_int, theta)
 
         mps_pair.update_2site_right(theta, 0, strategy)
 
@@ -208,7 +208,7 @@ def t_evol_mar_seemps(
         #   [output_bin | updated_system]
         # --------------------------------------------------------
         theta = np.tensordot(mps_pair[0], mps_pair[1], axes=(2, 0))
-        theta = np.einsum("pqij,aijb->apqb", swap_sys_bin, theta, optimize=True)
+        theta = contract_cached("pqij,aijb->apqb", swap_sys_bin, theta)
 
         mps_pair.update_2site_right(theta, 0, strategy)
 
@@ -403,12 +403,11 @@ def t_evol_nmar_seemps(
         for j in range(step, step + delay_steps - 1):
             next_bin = delay_line[j + 1].copy()
 
-            theta = np.einsum(
+            theta = contract_cached(
                 "aic,cjd,pqij->apqd",
                 feedback_bin,
                 next_bin,
                 swap_bin_bin,
-                optimize=True,
             )
 
             mps_swap = CanonicalMPS(
@@ -459,13 +458,12 @@ def t_evol_nmar_seemps(
         # --------------------------------------------------------
         # 4. Local interaction
         # --------------------------------------------------------
-        theta = np.einsum(
+        theta = contract_cached(
             "aic,cjd,dkb,pqrijk->apqrb",
             feedback_left,
             system_left,
             input_bin_oc,
             U_int,
-            optimize=True,
         )
 
         # --------------------------------------------------------
@@ -507,12 +505,11 @@ def t_evol_nmar_seemps(
         # --------------------------------------------------------
         # 7. Swap [system | loop] → [loop | system]
         # --------------------------------------------------------
-        theta = np.einsum(
+        theta = contract_cached(
             "aic,cjd,pqij->apqd",
             system_tensor_centered,
             loop_bin,
             swap_sys_bin,
-            optimize=True,
         )
 
         left_dummy = np.zeros((theta.shape[0], d_bin, 1), dtype=complex)
@@ -579,12 +576,11 @@ def t_evol_nmar_seemps(
             for j in range(step + delay_steps - 1, step, -1):
                 prev_bin = delay_line[j - 1].copy()
 
-                theta = np.einsum(
+                theta = contract_cached(
                     "aic,cjd,pqij->apqd",
                     prev_bin,
                     current_feedback,
                     swap_bin_bin,
-                    optimize=True,
                 )
 
                 left_dummy = np.zeros((theta.shape[0], d_bin, 1), dtype=complex)

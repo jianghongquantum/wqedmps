@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.linalg import expm
 
+from .mps_tools import contract_cached
 from .parameters import InputParams
 
 """
@@ -317,7 +318,7 @@ def expectation_1bin(bin_state: np.ndarray, op: np.ndarray) -> complex:
     op shape:
         (physical, physical)
     """
-    return np.einsum("aib,ij,ajb->", np.conj(bin_state), op, bin_state, optimize=True)
+    return contract_cached("aib,ij,ajb->", np.conj(bin_state), op, bin_state)
 
 
 def expectation_2bins(bin_state: np.ndarray, mpo: np.ndarray) -> complex:
@@ -326,12 +327,11 @@ def expectation_2bins(bin_state: np.ndarray, mpo: np.ndarray) -> complex:
 
     bin_state is assumed to already contain two physical sites grouped together.
     """
-    return np.einsum(
+    return contract_cached(
         "aikb,jlik,ajlb->",
         np.conj(bin_state),
         mpo,
         bin_state,
-        optimize=True,
     )
 
 
@@ -364,12 +364,11 @@ def expectation_nbins(ket: np.ndarray, mpo: np.ndarray) -> complex:
         ket_sub = left_bond + ket_phys + right_bond
         expectation_nbins._einsum_subscripts = f"{bra_sub},{mpo_sub},{ket_sub}->"
 
-    return np.einsum(
+    return contract_cached(
         expectation_nbins._einsum_subscripts,
         np.conj(ket),
         mpo,
         ket,
-        optimize=True,
     )
 
 

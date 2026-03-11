@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from functools import lru_cache
+
+import opt_einsum as oe
 import numpy as np
 
 from seemps.state import CanonicalMPS, DEFAULT_STRATEGY
@@ -7,6 +10,7 @@ from seemps.state import CanonicalMPS, DEFAULT_STRATEGY
 from .parameters import InputParams
 
 __all__ = [
+    "contract_cached",
     "pair_tensor",
     "swap_pair_tensor",
     "local_density_matrix",
@@ -16,11 +20,26 @@ __all__ = [
 ]
 
 
+@lru_cache(maxsize=None)
+def _contract_expression(
+    subscripts: str, operand_shapes: tuple[tuple[int, ...], ...]
+):
+    return oe.contract_expression(subscripts, *operand_shapes, optimize="greedy")
+
+
+def contract_cached(subscripts: str, *operands: np.ndarray) -> np.ndarray:
+    """
+    Evaluate a repeated tensor contraction with an expression cached by shape.
+    """
+    operand_shapes = tuple(tuple(int(dim) for dim in operand.shape) for operand in operands)
+    return _contract_expression(subscripts, operand_shapes)(*operands)
+
+
 def pair_tensor(left: np.ndarray, right: np.ndarray) -> np.ndarray:
     """
     Merge two neighboring MPS tensors with the shared bond contracted.
     """
-    return np.einsum("aib,bjc->aijc", left, right, optimize=True)
+    return contract_cached("aib,bjc->aijc", left, right)
 
 
 def swap_pair_tensor(
@@ -29,14 +48,14 @@ def swap_pair_tensor(
     """
     Contract two neighboring MPS tensors with a rank-4 SWAP gate.
     """
-    return np.einsum("aib,bjc,xyij->axyc", left, right, swap, optimize=True)
+    return contract_cached("aib,bjc,xyij->axyc", left, right, swap)
 
 
 def local_density_matrix(state: np.ndarray) -> np.ndarray:
     """
     Reduced single-site density matrix from a normalized local MPS tensor.
     """
-    return np.einsum("aib,ajb->ij", state, np.conj(state), optimize=True)
+    return contract_cached("aib,ajb->ij", state, np.conj(state))
 
 
 def split_pair_left(
