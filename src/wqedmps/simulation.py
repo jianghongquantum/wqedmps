@@ -172,7 +172,8 @@ def t_evol_mar_seemps(
         psi_sys = system_tensor
 
     # ------------------------------------------------------------
-    # Overwrite last correlation bin with OC-attached bin tensor
+    # Replace the final correlation entry with the emitted bin tensor
+    # carrying the orthogonality center on the bin site.
     # ------------------------------------------------------------
     if n_steps > 0:
         correlation_bins[-1] = output_field_states[-1].copy()
@@ -212,8 +213,8 @@ def t_evol_nmar_seemps(
     into the delay line and swapped back to restore the ordering.
 
     Observable tensors are stored with the orthogonality center on the
-    measured site, while tensors inside the delay line follow the gauge
-    required for the next evolution step.
+    measured site. Tensors kept inside the delay line follow the gauge needed
+    for the next evolution step instead.
     """
 
     delta_t = params.delta_t
@@ -395,7 +396,8 @@ def t_evol_nmar_seemps(
             last_feedback_center = current_feedback
 
     # ------------------------------------------------------------
-    # Replace last correlation tensor
+    # Replace the final correlation entry with the feedback-bin tensor carrying
+    # the orthogonality center on the feedback site.
     # ------------------------------------------------------------
     if n_steps > 0 and last_feedback_center is not None:
         correlation_bins[-1] = last_feedback_center

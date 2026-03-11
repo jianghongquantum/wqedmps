@@ -1,10 +1,13 @@
 """
-This module contains the functions used to calculate two time point correlation functions
-and supporting functions that might be used on such calculated correlation functions
+Correlation-function utilities for time-bin MPS outputs.
 
-It provides full two time point correlation calculation, calculation of a single cross sections
-of a two time correlation function, steady state correlation functions, and spectra.
+This module provides:
+- full two-time correlation calculations
+- fixed-time and steady-state correlation slices
+- spectra and related post-processing helpers
 
+Throughout this module, "OC" refers to the orthogonality center of the
+time-bin MPS representation.
 """
 
 import numpy as np
@@ -255,8 +258,7 @@ def time_dependent_spectrum(
 
 
 # ----------------------
-# Two time point Correlation functions
-# Wrapper functions designed in qutip sytle (these are less general)
+# Two-time correlation wrappers in a QuTiP-like style
 # ----------------------
 
 
@@ -275,7 +277,7 @@ def correlation_2op_2t(
     Parameters
     ----------
     correlation_bins : list[ndarray]
-        List of time bins with the OC in either the initial or final bin in the list.
+        Time-ordered bin tensors with the orthogonality center on one of the two boundary bins.
 
     a_op_list : ndarray/list[ndarray]
         Single operator, A, or a list of operators.
@@ -303,7 +305,7 @@ def correlation_2op_2t(
     list_flag = op_list_check(a_op_list)
 
     if list_flag and len(a_op_list) != len(b_op_list):
-        raise ValueError("Lengths of operators lists are not equals")
+        raise ValueError("Operator lists must have the same length")
 
     ops_same_time = []
     ops_two_time = []
@@ -347,7 +349,7 @@ def correlation_4op_2t(
     Parameters
     ----------
     correlation_bins : list[ndarray]
-        List of time bins with the OC in either the initial or final bin in the list.
+        Time-ordered bin tensors with the orthogonality center on one of the two boundary bins.
 
     a_op_list : ndarray/list[ndarray]
         Single operator, A, or a list of operators.
@@ -383,7 +385,7 @@ def correlation_4op_2t(
     if list_flag and not (
         len(a_op_list) == len(b_op_list) == len(c_op_list) == len(d_op_list)
     ):
-        raise ValueError("Lengths of operators lists are not equal")
+        raise ValueError("Operator lists must have the same length")
 
     ops_same_time = []
     ops_two_time = []
@@ -429,7 +431,7 @@ def correlation_2op_1t(
     Parameters
     ----------
     correlation_bins : list[ndarray]
-        List of time bins with the OC in either the initial or final bin in the list.
+        Time-ordered bin tensors with the orthogonality center on one of the two boundary bins.
 
     a_op_list : ndarray/list[ndarray]
         Single operator, A, or a list of operators.
@@ -456,7 +458,7 @@ def correlation_2op_1t(
     list_flag = op_list_check(a_op_list)
 
     if list_flag and len(a_op_list) != len(b_op_list):
-        raise ValueError("Lengths of operators lists are not equals")
+        raise ValueError("Operator lists must have the same length")
 
     ops_same_time = []
     ops_two_time = []
@@ -496,7 +498,7 @@ def correlation_4op_1t(
     Parameters
     ----------
     correlation_bins : list[ndarray]
-        List of time bins with the OC in either the initial or final bin in the list.
+        Time-ordered bin tensors with the orthogonality center on one of the two boundary bins.
 
     a_op_list : ndarray/list[ndarray]
         Single operator, A, or a list of operators.
@@ -532,7 +534,7 @@ def correlation_4op_1t(
     if list_flag and not (
         len(a_op_list) == len(b_op_list) == len(c_op_list) == len(d_op_list)
     ):
-        raise ValueError("Lengths of operators lists are not equal")
+        raise ValueError("Operator lists must have the same length")
 
     ops_same_time = []
     ops_two_time = []
@@ -577,7 +579,7 @@ def correlation_ss_2op(
     Parameters
     ----------
     correlation_bins : list[ndarray]
-        List of time bins with the OC in either the initial or final bin in the list.
+        Time-ordered bin tensors with the orthogonality center on one of the two boundary bins.
 
     a_op_list : ndarray/list[ndarray]
         Single operator, A, or a list of operators.
@@ -614,7 +616,7 @@ def correlation_ss_2op(
     list_flag = op_list_check(a_op_list)
 
     if list_flag and len(a_op_list) != len(b_op_list):
-        raise ValueError("Lengths of operators lists are not equals")
+        raise ValueError("Operator lists must have the same length")
 
     ops_same_time = []
     ops_two_time = []
@@ -664,7 +666,7 @@ def correlation_ss_4op(
     Parameters
     ----------
     correlation_bins : list[ndarray]
-        List of time bins with the OC in either the initial or final bin in the list.
+        Time-ordered bin tensors with the orthogonality center on one of the two boundary bins.
 
     a_op_list : ndarray/list[ndarray]
         Single operator, A, or a list of operators.
@@ -710,7 +712,7 @@ def correlation_ss_4op(
     if list_flag and not (
         len(a_op_list) == len(b_op_list) == len(c_op_list) == len(d_op_list)
     ):
-        raise ValueError("Lengths of operators lists are not equal")
+        raise ValueError("Operator lists must have the same length")
 
     ops_same_time = []
     ops_two_time = []
@@ -746,9 +748,9 @@ def correlation_ss_4op(
 
 
 # -------------------------------------------
-# The functional code used for correlation calculations.
-# This is the logic, and are also more general functions
-# (can calculate ANY arbitrary two time correlation functions on the output field)
+# Core correlation routines.
+# These lower-level functions implement the actual transport and measurement
+# logic and can evaluate arbitrary two-time output-field correlators.
 # -------------------------------------------
 def correlations_2t(
     correlation_bins: list[np.ndarray],
@@ -759,13 +761,15 @@ def correlations_2t(
 ) -> tuple[list[np.ndarray], np.ndarray]:
     """
     General two-time correlation calculator.
-    Take in list of time ordered normalized (with OC) time bins at position of relevance.
-    Calculate a list of arbitrary two time point correlation functions at t and t+t' for nonnegative t'.
+
+    Take a time-ordered list of normalized time-bin tensors with the
+    orthogonality center positioned on one boundary bin and compute arbitrary
+    correlations at t and t + tau for nonnegative tau.
 
     Parameters
     ----------
-    time_bin_list : [ndarray]
-        List of time bins with the OC in either the initial or final bin in the list.
+    correlation_bins : list[np.ndarray]
+        Time-ordered bin tensors with the orthogonality center on one of the two boundary bins.
 
     ops_same_time : [ndarray]
         List of operators of which correlation functions should be calculated in the case that t'=0 (same time). These should exist in a single time-bin tensor space.
@@ -786,7 +790,7 @@ def correlations_2t(
         List of 2D arrays, each a two time correlation function corresponding by index to the operators in ops_same_time and ops_two_time.
         The two time correlation function is stored as f[t,t'], with non-negative t' and time increments between points given by the simulation.
 
-    correaltion_times : np.ndarray[float]
+    correlation_times : np.ndarray[float]
         List of time points for the t and t' axes for the calculated correlation functions.
     """
     d_t_total = params.d_t_total
@@ -806,66 +810,61 @@ def correlations_2t(
         ]
     )
 
-    # If the OC is at end of the time bin list, move it to the start (shifts OC from one end to other, index 0)
+    # Move the orthogonality center from the end of the list to index 0.
     for i in range(len(time_bin_list_copy) - 1, 0, -1):
         bin_contraction = pair_tensor(time_bin_list_copy[i - 1], time_bin_list_copy[i])
         left_bin, right_bin = split_pair_left(bin_contraction, strategy)
-        time_bin_list_copy[i] = right_bin  # right normalized system bin
-        time_bin_list_copy[i - 1] = left_bin  # OC on left bin
+        time_bin_list_copy[i] = right_bin
+        time_bin_list_copy[i - 1] = left_bin
 
-    # Loop over to fill in correlation matrices values
+    # Loop over the rows of the correlation matrix.
     if completion_print_flag:
         print("Correlation Calculation Completion:")
     loop_num = len(time_bin_list_copy) - 1
-    print_rate = max(round(loop_num / 20.0), 1)  # Print every 5%, 20/100
+    print_rate = max(round(loop_num / 20.0), 1)  # Print progress in about 5% steps.
     for i in range(len(time_bin_list_copy) - 1):
         i_1 = time_bin_list_copy[0]
         i_2 = time_bin_list_copy[1]
 
-        # for the first row (tau=0)
+        # First column: tau = 0.
         for k in range(len(correlations)):
             correlations[k][i, 0] = expectation_1bin(
                 i_1, ops_same_time[k]
-            )  # this means I'm storing [t,tau]
+            )
 
-        # for the rest of the rows (column by column)
+        # Remaining columns: tau > 0.
         for j in range(len(time_bin_list_copy) - 1):
             state = pair_tensor(i_1, i_2)
             for k in range(len(correlations)):
                 correlations[k][i, j + 1] = expectation_nbins(
                     state, ops_two_time[k]
-                )  # this means I'm storing [t,tau]
+                )
 
-            swap_gateped_tensor = swap_pair_tensor(
-                i_1, i_2
-            )  # swap_gateping the time bin down the line
-            i_t2, i_1 = split_pair_right(swap_gateped_tensor, strategy)
+            swapped_pair = swap_pair_tensor(i_1, i_2)
+            i_t2, i_1 = split_pair_right(swapped_pair, strategy)
 
             if j < (len(time_bin_list_copy) - 2):
-                i_2 = time_bin_list_copy[
-                    j + 2
-                ]  # next time bin for the next correlation
-                time_bin_list_copy[j] = i_t2  # update of the increasing bin
+                i_2 = time_bin_list_copy[j + 2]
+                time_bin_list_copy[j] = i_t2
             if j == len(time_bin_list_copy) - 2:
                 time_bin_list_copy[j] = i_t2
                 time_bin_list_copy[j + 1] = i_1
 
-        # after the last value of the column we bring back the first time
+        # After finishing the row, restore the ordering of the remaining bins.
         for j in range(len(time_bin_list_copy) - 1, 0, -1):
-            swap_gateped_tensor = swap_pair_tensor(
+            swapped_pair = swap_pair_tensor(
                 time_bin_list_copy[j - 1], time_bin_list_copy[j]
             )
-            returning_bin, right_bin = split_pair_left(swap_gateped_tensor, strategy)
+            returning_bin, right_bin = split_pair_left(swapped_pair, strategy)
             if j > 1:
-                # timeBinListCopy[j] = vt[range(chi),:].reshape(chi,dTime,timeBinListCopy[i].shape[-1]) #right normalized system bin
-                time_bin_list_copy[j] = right_bin  # right normalized system bin
-                time_bin_list_copy[j - 1] = returning_bin  # OC on left bin
-            # Final iteration drop the returning bin
+                time_bin_list_copy[j] = right_bin
+                time_bin_list_copy[j - 1] = returning_bin
+            # Final iteration drops the returned left bin.
             if j == 1:
                 time_bin_list_copy[j] = right_bin
         time_bin_list_copy = time_bin_list_copy[
             1:
-        ]  # Truncating the start of the list now that are done with that bin (t=i)
+        ]  # Drop the leftmost bin after finishing the row for that t.
 
         if i % print_rate == 0 and completion_print_flag:
             print(round((float(i) / loop_num) * 100, 1), "%")
@@ -883,13 +882,15 @@ def correlations_1t(
 ) -> tuple[list[np.ndarray], np.ndarray]:
     """
     General two-time correlation calculator along a single axis.
-    Take in list of time ordered normalized (with OC) time bins at position of relevance.
-    Calculate a list of arbitrary two time point correlation functions at t and t+tau for nonnegative t'.
+
+    Take a time-ordered list of normalized time-bin tensors with the
+    orthogonality center positioned on one boundary bin and compute arbitrary
+    correlations at t and t + tau for nonnegative tau.
 
     Parameters
     ----------
-    time_bin_list : list[ndarray]
-        List of time bins with the OC in either the initial or final bin in the list.
+    correlation_bins : list[np.ndarray]
+        Time-ordered bin tensors with the orthogonality center on one of the two boundary bins.
 
     ops_same_time : list[ndarray]
         List of operators of which correlation functions should be calculated in the case that t'=0 (same time). These should exist in a single time-bin tensor space.
@@ -932,19 +933,22 @@ def correlations_1t(
     size = len(time_bin_list_copy)
     correlations = np.array([np.zeros(size, dtype=complex) for i in ops_two_time])
 
-    # Move OC back to t_index, then swap_gate that bin to start of list
+    # Move the orthogonality center back to t_index.
     for i in range(size - 1, t_index, -1):
         bin_contraction = pair_tensor(time_bin_list_copy[i - 1], time_bin_list_copy[i])
         left_bin, right_bin = split_pair_left(bin_contraction, strategy)
-        time_bin_list_copy[i] = right_bin  # right normalized system bin
-        time_bin_list_copy[i - 1] = left_bin  # OC on left bin
+        time_bin_list_copy[i] = right_bin
+        time_bin_list_copy[i - 1] = left_bin
 
-    # swap_gate bin the t_index bin backwards from t_index -> 0, with the OC
+    # Bring the selected bin, together with the orthogonality center, to
+    # the start of the list.
     for i in range(t_index, 0, -1):
-        bin_contraction = swap_pair_tensor(time_bin_list_copy[i - 1], time_bin_list_copy[i])
+        bin_contraction = swap_pair_tensor(
+            time_bin_list_copy[i - 1], time_bin_list_copy[i]
+        )
         left_bin, right_bin = split_pair_left(bin_contraction, strategy)
-        time_bin_list_copy[i] = right_bin  # right normalized system bin
-        time_bin_list_copy[i - 1] = left_bin  # OC on left bin
+        time_bin_list_copy[i] = right_bin
+        time_bin_list_copy[i - 1] = left_bin
 
     # Calculate the rest of the points
     for i in range(0, size - 1):
@@ -956,15 +960,13 @@ def correlations_1t(
         for j in range(len(ops_two_time)):
             correlations[j][i] = expectation_nbins(state, ops_two_time[j])
 
-        swap_gates = swap_pair_tensor(i_1, i_2)
-        _, i_t2 = split_pair_right(swap_gates, strategy)
+        swapped_pair = swap_pair_tensor(i_1, i_2)
+        _, i_t2 = split_pair_right(swapped_pair, strategy)
 
-        # Now put OC in the right bin, i_t2, to move it up the chain
-        time_bin_list_copy[i + 1] = i_t2  # OC on right bin
+        # Move the orthogonality center one bin to the right.
+        time_bin_list_copy[i + 1] = i_t2
 
-    # Calculate the single same time point
-    # Shift values above t_index to the right to prepare for insertion
-
+    # Insert the equal-time value at tau = 0.
     for j in range(len(ops_same_time)):
         correlations[j][t_index + 1 :] = correlations[j][t_index:-1]
         correlations[j][t_index] = expectation_1bin(
@@ -993,7 +995,7 @@ def operator_steady_state_index(
     Parameters
     ----------
     output_field_states : list[np.ndarray]
-        List of OC normalized output_field_states/bins.
+        Time-ordered one-bin tensors with the orthogonality center on the measured bin.
 
     operator_list : list[np.ndarray]
         List of single time point operators to test convergence of their expectation values.
@@ -1044,7 +1046,7 @@ def steady_state_index(
     Parameters
     ----------
     output_field_states : list[np.ndarray]
-        List of OC normalized output_field_states/bins.
+        Time-ordered one-bin tensors with the orthogonality center on the measured bin.
 
     tol : float, default: 1e-5
         Maximum deviation allowed in the final window
@@ -1098,10 +1100,11 @@ def correlation_ss_1t(
     Parameters
     ----------
     correlation_bins : list[np.ndarray]
-        Correlation bins of the outputfield states used to determine multi-timepoint correlation functions of the output field.
+        Correlation bins built from the output-field tensors and used for
+        multi-time correlation functions.
 
     output_field_states : list[np.ndarray]
-        OC normalized output field states.
+        Time-ordered one-bin tensors with the orthogonality center on the measured bin.
 
     ops_same_time : [ndarray]
         List of operators of which correlation functions should be calculated in the case that tau=0 (same time). These should exist in a single time-bin tensor space.
@@ -1163,12 +1166,12 @@ def correlation_ss_1t(
     size = len(time_bin_list_copy)
     correlations = np.array([np.zeros(size, dtype=complex) for i in ops_two_time])
 
-    # Move OC back to t, then forward for positive taus
+    # Move the orthogonality center back to t = t_ss.
     for i in range(size - 1, 0, -1):
         bin_contraction = pair_tensor(time_bin_list_copy[i - 1], time_bin_list_copy[i])
         left_bin, right_bin = split_pair_left(bin_contraction, strategy)
-        time_bin_list_copy[i] = right_bin  # right normalized system bin
-        time_bin_list_copy[i - 1] = left_bin  # OC on left bin
+        time_bin_list_copy[i] = right_bin
+        time_bin_list_copy[i - 1] = left_bin
 
     # Calculate the single same time point
     for j in range(len(ops_same_time)):
@@ -1184,11 +1187,11 @@ def correlation_ss_1t(
         for j in range(len(ops_two_time)):
             correlations[j][i] = expectation_nbins(state, ops_two_time[j])
 
-        swap_gates = swap_pair_tensor(i_1, i_2)
-        _, i_t2 = split_pair_right(swap_gates, strategy)
+        swapped_pair = swap_pair_tensor(i_1, i_2)
+        _, i_t2 = split_pair_right(swapped_pair, strategy)
 
-        # Now put OC in the right bin, i_t2, to move it up the chain
-        time_bin_list_copy[i] = i_t2  # OC on right bin
+        # Move the orthogonality center one bin to the right.
+        time_bin_list_copy[i] = i_t2
 
     tau_list = np.arange(size) * delta_t
     return correlations, tau_list, t_steady

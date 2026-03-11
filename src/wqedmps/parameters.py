@@ -195,13 +195,18 @@ class Bins:
         Time-ordered system tensors.
 
     output_field_states : list
-        Time-ordered outgoing field-bin tensors.
+        Time-ordered one-bin tensors from the primary stored output branch.
+        For Markovian simulations these are the emitted bins. For the current
+        non-Markovian simulation they are the feedback-branch bins written back
+        into the delay line.
 
     input_field_states : list
-        Time-ordered input field-bin tensors.
+        Time-ordered input field-bin tensors with the orthogonality center on
+        the bin site.
 
     correlation_bins : list
-        Auxiliary tensors used in correlation-function calculations.
+        Auxiliary time-bin tensors used in correlation-function calculations.
+        These are stored in the gauge expected by `correlation.py`.
 
     schmidt : list
         Schmidt spectra recorded during evolution.
@@ -210,8 +215,9 @@ class Bins:
         Simulation time grid aligned with the stored outputs.
 
     loop_field_states : list or None
-        Field tensors stored in the feedback loop / delayed channel
-        for non-Markovian simulations.
+        Additional non-Markovian branch tensors.
+        In the current feedback algorithm these are the forward/output bins
+        paired with the system after the local three-body interaction.
 
     schmidt_tau : list or None
         Schmidt spectra associated with the delayed/loop partition.

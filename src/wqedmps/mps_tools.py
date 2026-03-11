@@ -68,6 +68,9 @@ def swap_pair_tensor(
 ) -> np.ndarray:
     """
     Apply a nearest-neighbor SWAP to two neighboring MPS tensors.
+
+    The optional ``swap`` argument is kept only for backward compatibility
+    with older call sites that used an explicit SWAP gate tensor.
     """
     del swap
     return swap_theta(pair_tensor(left, right))
