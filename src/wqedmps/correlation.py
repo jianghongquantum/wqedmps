@@ -813,12 +813,7 @@ def correlations_2t(
     # If the OC is at end of the time bin list, move it to the start (shifts OC from one end to other, index 0)
     for i in range(len(time_bin_list_copy) - 1, 0, -1):
         bin_contraction = pair_tensor(time_bin_list_copy[i - 1], time_bin_list_copy[i])
-        left_bin, right_bin = split_pair_left(
-            bin_contraction,
-            time_bin_list_copy[i - 1],
-            time_bin_list_copy[i],
-            strategy,
-        )
+        left_bin, right_bin = split_pair_left(bin_contraction, strategy)
         time_bin_list_copy[i] = right_bin  # right normalized system bin
         time_bin_list_copy[i - 1] = left_bin  # OC on left bin
 
@@ -848,7 +843,7 @@ def correlations_2t(
             swap_gateped_tensor = swap_pair_tensor(
                 i_1, i_2, swap_gate_matrix
             )  # swap_gateping the time bin down the line
-            i_t2, i_1 = split_pair_right(swap_gateped_tensor, i_1, i_2, strategy)
+            i_t2, i_1 = split_pair_right(swap_gateped_tensor, strategy)
 
             if j < (len(time_bin_list_copy) - 2):
                 i_2 = time_bin_list_copy[
@@ -864,12 +859,7 @@ def correlations_2t(
             swap_gateped_tensor = swap_pair_tensor(
                 time_bin_list_copy[j - 1], time_bin_list_copy[j], swap_gate_matrix
             )
-            returning_bin, right_bin = split_pair_left(
-                swap_gateped_tensor,
-                time_bin_list_copy[j - 1],
-                time_bin_list_copy[j],
-                strategy,
-            )
+            returning_bin, right_bin = split_pair_left(swap_gateped_tensor, strategy)
             if j > 1:
                 # timeBinListCopy[j] = vt[range(chi),:].reshape(chi,dTime,timeBinListCopy[i].shape[-1]) #right normalized system bin
                 time_bin_list_copy[j] = right_bin  # right normalized system bin
@@ -952,12 +942,7 @@ def correlations_1t(
     # Move OC back to t_index, then swap_gate that bin to start of list
     for i in range(size - 1, t_index, -1):
         bin_contraction = pair_tensor(time_bin_list_copy[i - 1], time_bin_list_copy[i])
-        left_bin, right_bin = split_pair_left(
-            bin_contraction,
-            time_bin_list_copy[i - 1],
-            time_bin_list_copy[i],
-            strategy,
-        )
+        left_bin, right_bin = split_pair_left(bin_contraction, strategy)
         time_bin_list_copy[i] = right_bin  # right normalized system bin
         time_bin_list_copy[i - 1] = left_bin  # OC on left bin
 
@@ -966,12 +951,7 @@ def correlations_1t(
         bin_contraction = swap_pair_tensor(
             time_bin_list_copy[i - 1], time_bin_list_copy[i], swap_gate_matrix
         )
-        left_bin, right_bin = split_pair_left(
-            bin_contraction,
-            time_bin_list_copy[i - 1],
-            time_bin_list_copy[i],
-            strategy,
-        )
+        left_bin, right_bin = split_pair_left(bin_contraction, strategy)
         time_bin_list_copy[i] = right_bin  # right normalized system bin
         time_bin_list_copy[i - 1] = left_bin  # OC on left bin
 
@@ -986,7 +966,7 @@ def correlations_1t(
             correlations[j][i] = expectation_nbins(state, ops_two_time[j])
 
         swap_gates = swap_pair_tensor(i_1, i_2, swap_gate_matrix)
-        _, i_t2 = split_pair_right(swap_gates, i_1, i_2, strategy)
+        _, i_t2 = split_pair_right(swap_gates, strategy)
 
         # Now put OC in the right bin, i_t2, to move it up the chain
         time_bin_list_copy[i + 1] = i_t2  # OC on right bin
@@ -1198,12 +1178,7 @@ def correlation_ss_1t(
     # Move OC back to t, then forward for positive taus
     for i in range(size - 1, 0, -1):
         bin_contraction = pair_tensor(time_bin_list_copy[i - 1], time_bin_list_copy[i])
-        left_bin, right_bin = split_pair_left(
-            bin_contraction,
-            time_bin_list_copy[i - 1],
-            time_bin_list_copy[i],
-            strategy,
-        )
+        left_bin, right_bin = split_pair_left(bin_contraction, strategy)
         time_bin_list_copy[i] = right_bin  # right normalized system bin
         time_bin_list_copy[i - 1] = left_bin  # OC on left bin
 
@@ -1222,7 +1197,7 @@ def correlation_ss_1t(
             correlations[j][i] = expectation_nbins(state, ops_two_time[j])
 
         swap_gates = swap_pair_tensor(i_1, i_2, swap_gate_matrix)
-        _, i_t2 = split_pair_right(swap_gates, i_1, i_2, strategy)
+        _, i_t2 = split_pair_right(swap_gates, strategy)
 
         # Now put OC in the right bin, i_t2, to move it up the chain
         time_bin_list_copy[i] = i_t2  # OC on right bin

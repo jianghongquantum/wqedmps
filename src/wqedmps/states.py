@@ -425,18 +425,18 @@ def _fock_pulse(
     curr = pair_tensor(left_factor, right_factor)
 
     for k in range(m - 2, 1, -1):
-        curr_left, right = split_pair_left(curr, left_factor, right_factor, strategy)
+        curr_left, right = split_pair_left(curr, strategy)
         tensors.append(right)
 
         left_factor = calc_ak(pulse_envs[k - 1])
         right_factor = curr_left
         curr = pair_tensor(left_factor, right_factor)
 
-    curr_left, right = split_pair_left(curr, left_factor, right_factor, strategy)
+    curr_left, right = split_pair_left(curr, strategy)
     tensors.append(right)
 
     curr = pair_tensor(a1, curr_left)
-    left, right = split_pair_left(curr, a1, curr_left, strategy)
+    left, right = split_pair_left(curr, strategy)
 
     tensors.append(right)
     tensors.append(left)

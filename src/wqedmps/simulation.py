@@ -14,15 +14,13 @@ calculations (populations, correlations, spectra and entanglement).
 from dataclasses import dataclass
 import numpy as np
 
+from seemps.state.schmidt import _left_orth_2site, _right_orth_2site, _schmidt_weights
 from wqedmps import states as states
-from wqedmps.mps_tools import contract_cached, strategy_from_params
-from collections.abc import Iterator
-from wqedmps.parameters import InputParams, Bins
-from typing import Callable, TypeAlias
+from wqedmps.mps_tools import contract_cached, pair_tensor, strategy_from_params
+from wqedmps.parameters import InputParams
 from wqedmps.hamiltonians import Hamiltonian
 from wqedmps.operators import *
 from wqedmps.operators import u_evol, swap_gate
-from seemps.state import CanonicalMPS
 
 __all__ = ["t_evol_mar_seemps", "t_evol_nmar_seemps", "BinsSeemps", "BinsSeempsNMar"]
 
@@ -144,20 +142,16 @@ def t_evol_mar_seemps(
     # ------------------------------------------------------------
     psi_sys = np.asarray(i_s0, dtype=complex)
 
-    mps_sys0 = CanonicalMPS([psi_sys], center=0, normalize=False)
-    system_states = [np.array(mps_sys0[0], copy=True)]
+    system_states = [np.array(psi_sys, copy=True)]
 
     # Initial bin entry (for time alignment with the simulation grid)
-    mps_bin0 = CanonicalMPS(
-        [np.asarray(i_n0, dtype=complex)], center=0, normalize=False
-    )
-
-    output_field_states = [np.array(mps_bin0[0], copy=True)]
-    input_field_states = [np.array(mps_bin0[0], copy=True)]
-    correlation_bins = [np.array(mps_bin0[0], copy=True)]
+    initial_bin = np.asarray(i_n0, dtype=complex)
+    output_field_states = [np.array(initial_bin, copy=True)]
+    input_field_states = [np.array(initial_bin, copy=True)]
+    correlation_bins = [np.array(initial_bin, copy=True)]
 
     schmidt = [np.array([1.0])]
-    system_tensor = np.array(mps_sys0[0], copy=True)
+    system_tensor = np.array(psi_sys, copy=True)
 
     # ============================================================
     # Time evolution loop
@@ -170,36 +164,22 @@ def t_evol_mar_seemps(
         # --- Current input bin ---
         input_bin = np.asarray(next(input_field), dtype=complex)
 
-        # Build the local pair [system | input_bin]
-        mps_pair = CanonicalMPS(
-            [psi_sys.copy(), input_bin.copy()],
-            center=0,
-            normalize=False,
-        )
-
         # --------------------------------------------------------
         # Store the input bin with orthogonality center on the bin
         # --------------------------------------------------------
         # Merge the two local tensors
-        theta_in = np.tensordot(mps_pair[0], mps_pair[1], axes=(2, 0))
+        theta_in = pair_tensor(psi_sys, input_bin)
         theta = theta_in.copy()
 
-        mps_in = CanonicalMPS(
-            [np.array(mps_pair[0], copy=True), np.array(mps_pair[1], copy=True)],
-            center=0,
-            normalize=False,
-        )
         # Split the pair and move the center to the input-bin site
-        mps_in.update_2site_right(theta_in, 0, strategy)
-        input_field_states.append(np.array(mps_in[1], copy=True))
+        _, input_bin_centered, _ = _left_orth_2site(theta_in, strategy)
+        input_field_states.append(np.array(input_bin_centered, copy=True))
 
         # --------------------------------------------------------
         # System–bin interaction
         # --------------------------------------------------------
-        # psi = np.tensordot(mps_pair[0], mps_pair[1], axes=(2, 0))
         theta = contract_cached("pqij,aijb->apqb", U_int, theta)
-
-        mps_pair.update_2site_right(theta, 0, strategy)
+        system_left, input_bin_after_interaction, _ = _left_orth_2site(theta, strategy)
 
         # --------------------------------------------------------
         # Swap system and bin
@@ -207,29 +187,26 @@ def t_evol_mar_seemps(
         # Resulting pair:
         #   [output_bin | updated_system]
         # --------------------------------------------------------
-        theta = np.tensordot(mps_pair[0], mps_pair[1], axes=(2, 0))
+        theta = pair_tensor(system_left, input_bin_after_interaction)
         theta = contract_cached("pqij,aijb->apqb", swap_sys_bin, theta)
+        theta_centered_on_output = theta.copy()
 
-        mps_pair.update_2site_right(theta, 0, strategy)
+        correlation_tensor, system_tensor, _ = _left_orth_2site(theta, strategy)
 
         # --------------------------------------------------------
         # Schmidt values across the active cut
         # --------------------------------------------------------
-        w = np.array(mps_pair.Schmidt_weights(), copy=True)
+        w = np.array(_schmidt_weights(system_tensor), copy=True)
         s = np.sqrt(np.maximum(w, 0.0))
         schmidt.append(s[: params.bond_max])
 
         # --------------------------------------------------------
         # Store system and emitted bin tensors
         # --------------------------------------------------------
-
-        system_tensor = np.array(mps_pair[1], copy=True)
-        # Correlation bin: store the left tensor from the SWAP split
-        correlation_tensor = np.array(mps_pair[0], copy=True)
-
-        # Store emitted bin with center moved to the bin site
-        mps_pair.recenter(0)
-        output_bin_tensor = np.array(mps_pair[0], copy=True)
+        system_tensor = np.array(system_tensor, copy=True)
+        correlation_tensor = np.array(correlation_tensor, copy=True)
+        output_bin_tensor, _, _ = _right_orth_2site(theta_centered_on_output, strategy)
+        output_bin_tensor = np.array(output_bin_tensor, copy=True)
 
         system_states.append(system_tensor)
         output_field_states.append(output_bin_tensor)
@@ -410,30 +387,17 @@ def t_evol_nmar_seemps(
                 swap_bin_bin,
             )
 
-            mps_swap = CanonicalMPS(
-                [feedback_bin.copy(), next_bin.copy()],
-                center=0,
-                normalize=False,
-            )
-            mps_swap.update_2site_right(theta, 0, strategy)
-
-            delay_line[j] = np.array(mps_swap[0], copy=True)
-            feedback_bin = np.array(mps_swap[1], copy=True)
+            left_bin, right_bin, _ = _left_orth_2site(theta, strategy)
+            delay_line[j] = np.array(left_bin, copy=True)
+            feedback_bin = np.array(right_bin, copy=True)
 
         # --------------------------------------------------------
         # 2. Combine [feedback | system]
         # --------------------------------------------------------
-        mps_fs = CanonicalMPS(
-            [feedback_bin.copy(), system_tensor.copy()],
-            center=0,
-            normalize=False,
-        )
-
-        theta = np.tensordot(mps_fs[0], mps_fs[1], axes=(2, 0))
-        mps_fs.update_2site_right(theta, 0, strategy)
-
-        feedback_left = np.array(mps_fs[0], copy=True)
-        system_tensor = np.array(mps_fs[1], copy=True)
+        theta = pair_tensor(feedback_bin, system_tensor)
+        feedback_left, system_tensor, _ = _left_orth_2site(theta, strategy)
+        feedback_left = np.array(feedback_left, copy=True)
+        system_tensor = np.array(system_tensor, copy=True)
 
         # --------------------------------------------------------
         # 3. Read current input bin
@@ -441,17 +405,10 @@ def t_evol_nmar_seemps(
         input_bin = np.asarray(next(input_field), dtype=complex)
 
         # store with center on bin
-        mps_in = CanonicalMPS(
-            [system_tensor.copy(), input_bin.copy()],
-            center=0,
-            normalize=False,
-        )
-
-        theta_in = np.tensordot(mps_in[0], mps_in[1], axes=(2, 0))
-        mps_in.update_2site_right(theta_in, 0, strategy)
-
-        system_left = np.array(mps_in[0], copy=True)
-        input_bin_oc = np.array(mps_in[1], copy=True)
+        theta_in = pair_tensor(system_tensor, input_bin)
+        system_left, input_bin_oc, _ = _left_orth_2site(theta_in, strategy)
+        system_left = np.array(system_left, copy=True)
+        input_bin_oc = np.array(input_bin_oc, copy=True)
 
         input_field_states.append(input_bin_oc)
 
@@ -471,34 +428,18 @@ def t_evol_nmar_seemps(
         # --------------------------------------------------------
         theta = theta.reshape(theta.shape[0], d_bin, d_sys * d_bin, theta.shape[-1])
 
-        left_dummy = np.zeros((theta.shape[0], d_bin, 1), dtype=complex)
-        right_dummy = np.zeros((1, d_sys * d_bin, theta.shape[-1]), dtype=complex)
-        left_dummy[:, 0, 0] = 1
-        right_dummy[0, 0, :] = 1
-
-        mps_fb_rest = CanonicalMPS([left_dummy, right_dummy], center=0, normalize=False)
-        mps_fb_rest.update_2site_right(theta, 0, strategy)
-
-        feedback_left_new = np.array(mps_fb_rest[0], copy=True)
-        rest_oc = np.array(mps_fb_rest[1], copy=True)
+        feedback_left_new, rest_oc, _ = _left_orth_2site(theta, strategy)
+        feedback_left_new = np.array(feedback_left_new, copy=True)
+        rest_oc = np.array(rest_oc, copy=True)
 
         # --------------------------------------------------------
         # 6. Split [system | loop]
         # --------------------------------------------------------
         theta = rest_oc.reshape(rest_oc.shape[0], d_sys, d_bin, rest_oc.shape[-1])
 
-        left_dummy = np.zeros((theta.shape[0], d_sys, 1), dtype=complex)
-        right_dummy = np.zeros((1, d_bin, theta.shape[-1]), dtype=complex)
-        left_dummy[:, 0, 0] = 1
-        right_dummy[0, 0, :] = 1
-
-        mps_sys_loop = CanonicalMPS(
-            [left_dummy, right_dummy], center=1, normalize=False
-        )
-        mps_sys_loop.update_2site_left(theta, 0, strategy)
-
-        system_tensor_centered = np.array(mps_sys_loop[0], copy=True)
-        loop_bin = np.array(mps_sys_loop[1], copy=True)
+        system_tensor_centered, loop_bin, _ = _right_orth_2site(theta, strategy)
+        system_tensor_centered = np.array(system_tensor_centered, copy=True)
+        loop_bin = np.array(loop_bin, copy=True)
 
         system_states.append(system_tensor_centered)
 
@@ -512,48 +453,29 @@ def t_evol_nmar_seemps(
             swap_sys_bin,
         )
 
-        left_dummy = np.zeros((theta.shape[0], d_bin, 1), dtype=complex)
-        right_dummy = np.zeros((1, d_sys, theta.shape[-1]), dtype=complex)
-        left_dummy[:, 0, 0] = 1
-        right_dummy[0, 0, :] = 1
-
-        mps_loop_sys = CanonicalMPS(
-            [left_dummy, right_dummy], center=1, normalize=False
-        )
-        mps_loop_sys.update_2site_left(theta, 0, strategy)
-
-        loop_bin_centered = np.array(mps_loop_sys[0], copy=True)
-        system_tensor = np.array(mps_loop_sys[1], copy=True)
+        loop_bin_centered, system_tensor, _ = _right_orth_2site(theta, strategy)
+        loop_bin_centered = np.array(loop_bin_centered, copy=True)
+        system_tensor = np.array(system_tensor, copy=True)
 
         # --------------------------------------------------------
         # 8. Attach loop bin to feedback branch
         # --------------------------------------------------------
-        theta = np.tensordot(feedback_left_new, loop_bin_centered, axes=(2, 0))
+        theta = pair_tensor(feedback_left_new, loop_bin_centered)
 
-        left_dummy = np.zeros((theta.shape[0], d_bin, 1), dtype=complex)
-        right_dummy = np.zeros((1, d_bin, theta.shape[-1]), dtype=complex)
-        left_dummy[:, 0, 0] = 1
-        right_dummy[0, 0, :] = 1
+        theta_centered_on_feedback = theta.copy()
+        feedback_left_mid, loop_bin_oc, _ = _left_orth_2site(theta, strategy)
+        feedback_left_mid = np.array(feedback_left_mid, copy=True)
+        loop_bin_oc = np.array(loop_bin_oc, copy=True)
 
-        mps_fb_loop = CanonicalMPS([left_dummy, right_dummy], center=0, normalize=False)
-        mps_fb_loop.update_2site_right(theta, 0, strategy)
-
-        feedback_left_mid = np.array(mps_fb_loop[0], copy=True)
-        loop_bin_oc = np.array(mps_fb_loop[1], copy=True)
-
-        w_fb = np.array(mps_fb_loop.Schmidt_weights(), copy=True)
+        w_fb = np.array(_schmidt_weights(loop_bin_oc), copy=True)
         schmidt.append(np.sqrt(np.maximum(w_fb, 0))[: params.bond_max])
 
-        # move center to feedback bin
-        mps_store = CanonicalMPS(
-            [feedback_left_mid.copy(), loop_bin_oc.copy()],
-            center=1,
-            normalize=False,
+        # Re-split the same pair with the center on the feedback bin.
+        feedback_bin_centered, loop_bin_internal, _ = _right_orth_2site(
+            theta_centered_on_feedback, strategy
         )
-        mps_store.recenter(0)
-
-        feedback_bin_centered = np.array(mps_store[0], copy=True)
-        loop_bin_internal = np.array(mps_store[1], copy=True)
+        feedback_bin_centered = np.array(feedback_bin_centered, copy=True)
+        loop_bin_internal = np.array(loop_bin_internal, copy=True)
 
         output_field_states.append(feedback_bin_centered)
         loop_field_states.append(loop_bin_oc)
@@ -583,38 +505,21 @@ def t_evol_nmar_seemps(
                     swap_bin_bin,
                 )
 
-                left_dummy = np.zeros((theta.shape[0], d_bin, 1), dtype=complex)
-                right_dummy = np.zeros((1, d_bin, theta.shape[-1]), dtype=complex)
-                left_dummy[:, 0, 0] = 1
-                right_dummy[0, 0, :] = 1
-
-                mps_back = CanonicalMPS(
-                    [left_dummy, right_dummy],
-                    center=1,
-                    normalize=False,
-                )
-                mps_back.update_2site_left(theta, 0, strategy)
-
-                current_feedback = np.array(mps_back[0], copy=True)
-                right_bin = np.array(mps_back[1], copy=True)
+                theta_centered_on_delay = theta.copy()
+                current_feedback, right_bin, _ = _right_orth_2site(theta, strategy)
+                current_feedback = np.array(current_feedback, copy=True)
+                right_bin = np.array(right_bin, copy=True)
 
                 delay_line[j] = right_bin.copy()
 
-            schmidt_tau.append(np.array(mps_back.Schmidt_weights())[: params.bond_max])
+            schmidt_tau.append(np.array(_schmidt_weights(current_feedback))[: params.bond_max])
 
-            mps_tau = CanonicalMPS(
-                [current_feedback.copy(), right_bin.copy()],
-                center=0,
-                normalize=False,
+            correlation_tensor, delayed_bin, _ = _left_orth_2site(
+                theta_centered_on_delay, strategy
             )
-            mps_tau.recenter(1)
-
-            delay_line[step + 1] = np.array(mps_tau[1], copy=True)
-
-            correlation_bins.append(np.array(mps_tau[0], copy=True))
-
-            mps_tau.recenter(0)
-            last_feedback_center = np.array(mps_tau[0], copy=True)
+            delay_line[step + 1] = np.array(delayed_bin, copy=True)
+            correlation_bins.append(np.array(correlation_tensor, copy=True))
+            last_feedback_center = current_feedback.copy()
 
     # ------------------------------------------------------------
     # Replace last correlation tensor

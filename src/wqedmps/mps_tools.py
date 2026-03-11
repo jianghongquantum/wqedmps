@@ -5,7 +5,8 @@ from functools import lru_cache
 import opt_einsum as oe
 import numpy as np
 
-from seemps.state import CanonicalMPS, DEFAULT_STRATEGY
+from seemps.state import DEFAULT_STRATEGY
+from seemps.state.schmidt import _left_orth_2site, _right_orth_2site
 
 from .parameters import InputParams
 
@@ -39,7 +40,16 @@ def pair_tensor(left: np.ndarray, right: np.ndarray) -> np.ndarray:
     """
     Merge two neighboring MPS tensors with the shared bond contracted.
     """
-    return contract_cached("aib,bjc->aijc", left, right)
+    bond = left.shape[2]
+    if bond != right.shape[0]:
+        raise ValueError(
+            f"Incompatible MPS bond dimensions: {left.shape[2]} != {right.shape[0]}"
+        )
+
+    merged = left.reshape(left.shape[0] * left.shape[1], bond) @ right.reshape(
+        bond, right.shape[1] * right.shape[2]
+    )
+    return merged.reshape(left.shape[0], left.shape[1], right.shape[1], right.shape[2])
 
 
 def swap_pair_tensor(
@@ -60,38 +70,24 @@ def local_density_matrix(state: np.ndarray) -> np.ndarray:
 
 def split_pair_left(
     theta: np.ndarray,
-    left: np.ndarray,
-    right: np.ndarray,
     strategy,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Split a two-site tensor and keep the orthogonality center on the left site.
     """
-    mps_pair = CanonicalMPS(
-        [np.array(left, copy=True), np.array(right, copy=True)],
-        center=0,
-        normalize=False,
-    )
-    mps_pair.update_2site_left(theta, 0, strategy)
-    return np.array(mps_pair[0], copy=True), np.array(mps_pair[1], copy=True)
+    left, right, _ = _right_orth_2site(theta, strategy)
+    return left, right
 
 
 def split_pair_right(
     theta: np.ndarray,
-    left: np.ndarray,
-    right: np.ndarray,
     strategy,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Split a two-site tensor and keep the orthogonality center on the right site.
     """
-    mps_pair = CanonicalMPS(
-        [np.array(left, copy=True), np.array(right, copy=True)],
-        center=0,
-        normalize=False,
-    )
-    mps_pair.update_2site_right(theta, 0, strategy)
-    return np.array(mps_pair[0], copy=True), np.array(mps_pair[1], copy=True)
+    left, right, _ = _left_orth_2site(theta, strategy)
+    return left, right
 
 
 def strategy_from_params(params: InputParams):
