@@ -58,11 +58,11 @@ class BinsSeemps:
     schmidt
         Schmidt singular values across the active system–bin cut.
 
+
+    bond_dims
+        Actual retained bond dimension across the active system-bin cut.
     times
         Discrete simulation times.
-
-    psi_final
-        Final system tensor.
     """
 
     system_states: list[np.ndarray]
@@ -70,8 +70,8 @@ class BinsSeemps:
     input_field_states: list[np.ndarray]
     correlation_bins: list[np.ndarray]
     schmidt: list[np.ndarray]
+    bond_dims: list[int]
     times: np.ndarray
-    psi_final: np.ndarray
 
 
 def t_evol_mar_seemps(
@@ -151,6 +151,7 @@ def t_evol_mar_seemps(
     correlation_bins = [np.array(initial_bin, copy=True)]
 
     schmidt = [np.array([1.0])]
+    bond_dims = [1]
     system_tensor = np.array(psi_sys, copy=True)
 
     # ============================================================
@@ -199,6 +200,7 @@ def t_evol_mar_seemps(
         w = np.array(_schmidt_weights(system_tensor), copy=True)
         s = np.sqrt(np.maximum(w, 0.0))
         schmidt.append(s[: params.bond_max])
+        bond_dims.append(int(correlation_tensor.shape[2]))
 
         # --------------------------------------------------------
         # Store system and emitted bin tensors
@@ -226,8 +228,8 @@ def t_evol_mar_seemps(
         input_field_states=input_field_states,
         correlation_bins=correlation_bins,
         schmidt=schmidt,
+        bond_dims=bond_dims,
         times=times,
-        psi_final=system_tensor,
     )
 
 
@@ -267,14 +269,17 @@ class BinsSeempsNMar:
     schmidt
         Schmidt singular values associated with the feedback/output-bin cut.
 
+
+    bond_dims
+        Actual retained bond dimension across the feedback/output-bin cut.
     schmidt_tau
         Schmidt singular values associated with the final swap-back step.
 
+
+    bond_dims_tau
+        Actual retained bond dimension associated with the final swap-back step.
     times
         Discrete simulation times.
-
-    psi_final
-        Final system tensor.
     """
 
     system_states: list[np.ndarray]
@@ -283,9 +288,10 @@ class BinsSeempsNMar:
     input_field_states: list[np.ndarray]
     correlation_bins: list[np.ndarray]
     schmidt: list[np.ndarray]
+    bond_dims: list[int]
     schmidt_tau: list[np.ndarray]
+    bond_dims_tau: list[int]
     times: np.ndarray
-    psi_final: np.ndarray
 
 
 def t_evol_nmar_seemps(
@@ -352,7 +358,9 @@ def t_evol_nmar_seemps(
     correlation_bins = [vacuum.copy()]
 
     schmidt = [np.array([1.0])]
+    bond_dims = [1]
     schmidt_tau = [np.array([1.0])]
+    bond_dims_tau = [1]
 
     # Internal delay line
     delay_line = [vacuum.copy() for _ in range(delay_steps)]
@@ -469,6 +477,7 @@ def t_evol_nmar_seemps(
 
         w_fb = np.array(_schmidt_weights(loop_bin_oc), copy=True)
         schmidt.append(np.sqrt(np.maximum(w_fb, 0))[: params.bond_max])
+        bond_dims.append(int(feedback_left_mid.shape[2]))
 
         # Re-split the same pair with the center on the feedback bin.
         feedback_bin_centered, loop_bin_internal, _ = _right_orth_2site(
@@ -488,6 +497,7 @@ def t_evol_nmar_seemps(
         # --------------------------------------------------------
         if delay_steps == 1:
             schmidt_tau.append(np.array([1.0]))
+            bond_dims_tau.append(1)
             correlation_bins.append(feedback_left_mid.copy())
             last_feedback_center = feedback_bin_centered.copy()
 
@@ -512,7 +522,10 @@ def t_evol_nmar_seemps(
 
                 delay_line[j] = right_bin.copy()
 
-            schmidt_tau.append(np.array(_schmidt_weights(current_feedback))[: params.bond_max])
+            schmidt_tau.append(
+                np.array(_schmidt_weights(current_feedback))[: params.bond_max]
+            )
+            bond_dims_tau.append(int(current_feedback.shape[2]))
 
             correlation_tensor, delayed_bin, _ = _left_orth_2site(
                 theta_centered_on_delay, strategy
@@ -534,7 +547,8 @@ def t_evol_nmar_seemps(
         input_field_states=input_field_states,
         correlation_bins=correlation_bins,
         schmidt=schmidt,
+        bond_dims=bond_dims,
         schmidt_tau=schmidt_tau,
+        bond_dims_tau=bond_dims_tau,
         times=times,
-        psi_final=np.array(system_states[-1], copy=True),
     )
