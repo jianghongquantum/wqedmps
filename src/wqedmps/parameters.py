@@ -92,6 +92,11 @@ class InputParams:
 
     phase : float
         Propagation phase accumulated across the delay line.
+
+    svd_driver : {"gesdd", "gesvd"}
+        LAPACK SVD driver used by SeeMPS local tensor splits.
+        `gesdd` is the current default; `gesvd` can be faster for
+        many small repeated decompositions.
     """
 
     delta_t: float
@@ -106,6 +111,7 @@ class InputParams:
     tau: float = 0.0
     phase: float = 0.0
     atol: float = 1e-12
+    svd_driver: str = "gesdd"
 
     def __post_init__(self) -> None:
         """
@@ -130,6 +136,7 @@ class InputParams:
 
         self.tau = float(self.tau)
         self.phase = float(self.phase)
+        self.svd_driver = str(self.svd_driver).lower()
 
         if self.delta_t <= 0:
             raise ValueError("delta_t must be positive")
@@ -142,6 +149,9 @@ class InputParams:
 
         if self.tau < 0:
             raise ValueError("tau must be >= 0")
+
+        if self.svd_driver not in {"gesdd", "gesvd"}:
+            raise ValueError("svd_driver must be either 'gesdd' or 'gesvd'")
 
     @property
     def d_sys(self) -> int:

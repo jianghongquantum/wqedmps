@@ -5,6 +5,7 @@ from functools import lru_cache
 import opt_einsum as oe
 import numpy as np
 
+from seemps.cython import _select_svd_driver
 from seemps.state import DEFAULT_STRATEGY
 from seemps.state.schmidt import _left_orth_2site, _right_orth_2site
 
@@ -104,7 +105,12 @@ def split_pair_right(
 def strategy_from_params(params: InputParams):
     """
     Standard truncation strategy used across MPS update routines.
+
+    This also applies the requested SeeMPS SVD driver, which is a
+    process-global backend option used by `_left_orth_2site` and
+    `_right_orth_2site`.
     """
+    _select_svd_driver(params.svd_driver)
     return DEFAULT_STRATEGY.replace(
         tolerance=getattr(params, "atol", 1e-12),
         max_bond_dimension=params.bond_max,
