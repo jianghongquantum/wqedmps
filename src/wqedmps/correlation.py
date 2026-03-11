@@ -155,7 +155,7 @@ def spectral_intensity(
     """
     delta_t = input_params.delta_t
 
-    correlation_matrix_copy = np.array(correlation_matrix, copy=True)
+    correlation_matrix_copy = np.asarray(correlation_matrix).copy()
     # Taper end of signal if using filter
     if hanning_filter:
         taper_window = np.hanning(2 * taper_length)[taper_length:]
@@ -215,7 +215,7 @@ def time_dependent_spectrum(
         List of frequencies associated with the calculated time dependent spectrum.
     """
     delta_t = input_params.delta_t
-    correlation_matrix_copy = np.array(correlation_matrix, copy=True)
+    correlation_matrix_copy = np.asarray(correlation_matrix).copy()
     size = correlation_matrix_copy.shape[0]
 
     if w_list is None:

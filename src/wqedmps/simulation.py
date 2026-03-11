@@ -142,17 +142,17 @@ def t_evol_mar_seemps(
     # ------------------------------------------------------------
     psi_sys = np.asarray(i_s0, dtype=complex)
 
-    system_states = [np.array(psi_sys, copy=True)]
+    system_states = [psi_sys.copy()]
 
     # Initial bin entry (for time alignment with the simulation grid)
     initial_bin = np.asarray(i_n0, dtype=complex)
-    output_field_states = [np.array(initial_bin, copy=True)]
-    input_field_states = [np.array(initial_bin, copy=True)]
-    correlation_bins = [np.array(initial_bin, copy=True)]
+    output_field_states = [initial_bin.copy()]
+    input_field_states = [initial_bin.copy()]
+    correlation_bins = [initial_bin.copy()]
 
     schmidt = [np.array([1.0])]
     bond_dims = [1]
-    system_tensor = np.array(psi_sys, copy=True)
+    system_tensor = psi_sys.copy()
 
     # ============================================================
     # Time evolution loop
@@ -174,7 +174,7 @@ def t_evol_mar_seemps(
 
         # Split the pair and move the center to the input-bin site
         _, input_bin_centered, _ = _left_orth_2site(theta_in, strategy)
-        input_field_states.append(np.array(input_bin_centered, copy=True))
+        input_field_states.append(input_bin_centered.copy())
 
         # --------------------------------------------------------
         # System–bin interaction
@@ -205,10 +205,10 @@ def t_evol_mar_seemps(
         # --------------------------------------------------------
         # Store system and emitted bin tensors
         # --------------------------------------------------------
-        system_tensor = np.array(system_tensor, copy=True)
-        correlation_tensor = np.array(correlation_tensor, copy=True)
+        system_tensor = system_tensor.copy()
+        correlation_tensor = correlation_tensor.copy()
         output_bin_tensor, _, _ = _right_orth_2site(theta_centered_on_output, strategy)
-        output_bin_tensor = np.array(output_bin_tensor, copy=True)
+        output_bin_tensor = output_bin_tensor.copy()
 
         system_states.append(system_tensor)
         output_field_states.append(output_bin_tensor)
@@ -506,9 +506,7 @@ def t_evol_nmar_seemps(
 
                 delay_line[j] = right_bin
 
-            schmidt_tau.append(
-                np.array(_schmidt_weights(current_feedback))[: params.bond_max]
-            )
+            schmidt_tau.append(_schmidt_weights(current_feedback)[: params.bond_max])
             bond_dims_tau.append(int(current_feedback.shape[2]))
 
             correlation_tensor, delayed_bin, _ = _left_orth_2site(
