@@ -327,7 +327,7 @@ def expectation_2bins(bin_state: np.ndarray, mpo: np.ndarray) -> complex:
     bin_state is assumed to already contain two physical sites grouped together.
     """
     return np.einsum(
-        "aikb,ijkl,ajlb->",
+        "aikb,jlik,ajlb->",
         np.conj(bin_state),
         mpo,
         bin_state,
@@ -360,7 +360,7 @@ def expectation_nbins(ket: np.ndarray, mpo: np.ndarray) -> complex:
         ket_phys = labels[ket_rank : ket_rank + ket_rank - 2]
 
         bra_sub = left_bond + bra_phys + right_bond
-        mpo_sub = bra_phys + ket_phys
+        mpo_sub = ket_phys + bra_phys
         ket_sub = left_bond + ket_phys + right_bond
         expectation_nbins._einsum_subscripts = f"{bra_sub},{mpo_sub},{ket_sub}->"
 

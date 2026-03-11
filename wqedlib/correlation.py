@@ -1016,7 +1016,7 @@ def operator_steady_state_index(
     operator_list: list[np.ndarray],
     tol: float = 1e-5,
     window: int = 10,
-) -> np.ndarray[int]:
+) -> np.ndarray:
     """
     Steady-state index helper function to find the time step
     when the steady state is reached in the single time dynamics of each operator.
@@ -1037,13 +1037,13 @@ def operator_steady_state_index(
 
     Returns
     -------
-    steady_state_indices : ndarray[int]
+    steady_state_indices : np.ndarray
         The index of the start of the steady window for each operator.
         For each operator that a steady state is not found, the array contains np.nan at that index.
     """
     op_num = len(operator_list)
     expectation_vals_list = single_time_expectation(output_field_states, operator_list)
-    steady_state_indices = np.zeros(op_num, dtype=int)
+    steady_state_indices = np.full(op_num, np.nan, dtype=float)
     op_tracker = np.arange(op_num)
 
     for i in range(window, len(output_field_states)):
@@ -1062,15 +1062,12 @@ def operator_steady_state_index(
         if len(op_tracker) == 0:
             break
 
-    # Replace places without steady state with None
-    for j in op_tracker:
-        steady_state_indices[j] = np.nan
     return steady_state_indices
 
 
 def steady_state_index(
     output_field_states: list[np.ndarray], tol: float = 1e-5, window: int = 10
-) -> np.ndarray[int]:
+) -> int | None:
     """
     Steady-state index helper function to find the time step
     when the steady state is reached in the single time dynamics of each operator.
@@ -1088,15 +1085,19 @@ def steady_state_index(
 
     Returns
     -------
-    steady_state_index : int
+    steady_state_index : int or None
         The index of the start of the steady window for the output field.
+        Returns None if there are not enough bins or no steady window is found.
     """
     bin_num = len(output_field_states)
+    if bin_num < window:
+        return None
+
     bin_dim = output_field_states[0].shape[1]
     contracted_bins = np.empty((bin_num, bin_dim, bin_dim), dtype=complex)
     # TODO Maybe in future have density matrix function
-    contracted_bins[: window - 1] = np.stack(
-        [_local_density_matrix(output_field_states[i]) for i in range(window - 1)]
+    contracted_bins[:window] = np.stack(
+        [_local_density_matrix(output_field_states[i]) for i in range(window)]
     )
     for i in range(window, bin_num):
         contracted_bins[i] = _local_density_matrix(output_field_states[i])
