@@ -206,12 +206,21 @@ class Bins:
     schmidt : list
         Schmidt spectra recorded during evolution.
 
+    times : np.ndarray or None
+        Simulation time grid aligned with the stored outputs.
+
     loop_field_states : list or None
         Field tensors stored in the feedback loop / delayed channel
         for non-Markovian simulations.
 
     schmidt_tau : list or None
         Schmidt spectra associated with the delayed/loop partition.
+
+    bond_dims : list[int] or None
+        Retained bond dimensions associated with `schmidt`.
+
+    bond_dims_tau : list[int] or None
+        Retained bond dimensions associated with `schmidt_tau`.
     """
 
     system_states: list
@@ -219,5 +228,8 @@ class Bins:
     input_field_states: list
     correlation_bins: list
     schmidt: list
+    times: np.ndarray | None = None
     loop_field_states: list | None = None
     schmidt_tau: list | None = None
+    bond_dims: list | None = None
+    bond_dims_tau: list | None = None

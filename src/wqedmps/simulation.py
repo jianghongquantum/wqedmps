@@ -11,7 +11,6 @@ calculations (populations, correlations, spectra and entanglement).
 
 """
 
-from dataclasses import dataclass
 import numpy as np
 
 from seemps.state.schmidt import _left_orth_2site, _right_orth_2site, _schmidt_weights
@@ -23,61 +22,12 @@ from wqedmps.mps_tools import (
     swap_pair_tensor,
     swap_theta,
 )
-from wqedmps.parameters import InputParams
+from wqedmps.parameters import Bins, InputParams
 from wqedmps.hamiltonians import Hamiltonian
 from wqedmps.operators import *
 from wqedmps.operators import u_evol
 
-__all__ = ["t_evol_mar_seemps", "t_evol_nmar_seemps", "BinsSeemps", "BinsSeempsNMar"]
-
-
-# ============================================================
-# Output container
-# ============================================================
-@dataclass
-class BinsSeemps:
-    """
-    Local output of Markovian time-bin evolution.
-
-    This container stores the local tensors produced during the
-    time evolution of a system coupled to a 1D field.
-
-    Attributes
-    ----------
-    system_states
-        System tensor after each time step.
-
-    output_field_states
-        Emitted time-bin tensors, stored with the orthogonality
-        center on the bin site.
-
-    input_field_states
-        Input time-bin tensors used at each step. These are also
-        stored with the orthogonality center on the bin site.
-
-    correlation_bins
-        Tensors used for correlation-function calculations.
-        Intermediate entries store the left tensor obtained after
-        the SWAP split; the final entry is replaced by the bin
-        tensor with orthogonality center attached.
-
-    schmidt
-        Schmidt singular values across the active system–bin cut.
-
-
-    bond_dims
-        Actual retained bond dimension across the active system-bin cut.
-    times
-        Discrete simulation times.
-    """
-
-    system_states: list[np.ndarray]
-    output_field_states: list[np.ndarray]
-    input_field_states: list[np.ndarray]
-    correlation_bins: list[np.ndarray]
-    schmidt: list[np.ndarray]
-    bond_dims: list[int]
-    times: np.ndarray
+__all__ = ["t_evol_mar_seemps", "t_evol_nmar_seemps"]
 
 
 def t_evol_mar_seemps(
@@ -85,7 +35,7 @@ def t_evol_mar_seemps(
     i_s0: np.ndarray,
     i_n0: np.ndarray,
     params: InputParams,
-) -> BinsSeemps:
+) -> Bins:
     """
     Markovian time evolution using a local two-site MPS representation.
 
@@ -120,9 +70,10 @@ def t_evol_mar_seemps(
 
     Returns
     -------
-    BinsSeemps
+    Bins
         Container with system tensors, input/output bins,
-        correlation tensors, Schmidt values and final state.
+        correlation tensors, Schmidt values, retained bond dimensions
+        and the simulation time grid.
     """
 
     delta_t = params.delta_t
@@ -226,7 +177,7 @@ def t_evol_mar_seemps(
     if n_steps > 0:
         correlation_bins[-1] = output_field_states[-1].copy()
 
-    return BinsSeemps(
+    return Bins(
         system_states=system_states,
         output_field_states=output_field_states,
         input_field_states=input_field_states,
@@ -240,70 +191,13 @@ def t_evol_mar_seemps(
 # ------------------------------------------------------
 # Time evolution: Markovian and non-Markovian evolutions
 # ------------------------------------------------------
-@dataclass
-class BinsSeempsNMar:
-    """
-    Local output of non-Markovian time-bin evolution.
-
-    This container stores the local tensors produced during the
-    time evolution of a system coupled to a 1D field with a finite delay.
-
-    Attributes
-    ----------
-    system_states
-        System tensor after each time step.
-
-    loop_field_states
-        Forward/output time-bin tensors emitted into the waveguide.
-
-    output_field_states
-        Feedback-bin tensors after they are updated and written back
-        into the delay line.
-
-    input_field_states
-        Input time-bin tensors used at each step, stored with the
-        orthogonality center on the bin site.
-
-    correlation_bins
-        Tensors used for correlation-function calculations.
-        Intermediate entries store the left tensor obtained after the
-        final swap-back split; the last entry is replaced by the
-        centered feedback tensor, matching the original QwaveMPS logic.
-
-    schmidt
-        Schmidt singular values associated with the feedback/output-bin cut.
-
-
-    bond_dims
-        Actual retained bond dimension across the feedback/output-bin cut.
-    schmidt_tau
-        Schmidt singular values associated with the final swap-back step.
-
-
-    bond_dims_tau
-        Actual retained bond dimension associated with the final swap-back step.
-    times
-        Discrete simulation times.
-    """
-
-    system_states: list[np.ndarray]
-    loop_field_states: list[np.ndarray]
-    output_field_states: list[np.ndarray]
-    input_field_states: list[np.ndarray]
-    correlation_bins: list[np.ndarray]
-    schmidt: list[np.ndarray]
-    bond_dims: list[int]
-    schmidt_tau: list[np.ndarray]
-    bond_dims_tau: list[int]
-    times: np.ndarray
-
 
 def t_evol_nmar_seemps(
     ham: Hamiltonian,
     i_s0: np.ndarray,
     i_n0: np.ndarray,
     params: InputParams,
-) -> BinsSeempsNMar:
+) -> Bins:
     """
     Non-Markovian time evolution with finite delay.
 
@@ -506,7 +400,7 @@ def t_evol_nmar_seemps(
     if n_steps > 0 and last_feedback_center is not None:
         correlation_bins[-1] = last_feedback_center
 
-    return BinsSeempsNMar(
+    return Bins(
         system_states=system_states,
         loop_field_states=loop_field_states,
         output_field_states=output_field_states,
@@ -518,3 +412,5 @@ def t_evol_nmar_seemps(
         bond_dims_tau=bond_dims_tau,
         times=times,
     )
+
+
