@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import numpy as np
 from scipy.linalg import expm
-from ncon import ncon
 
 from .parameters import InputParams
 
@@ -327,9 +326,12 @@ def expectation_2bins(bin_state: np.ndarray, mpo: np.ndarray) -> complex:
 
     bin_state is assumed to already contain two physical sites grouped together.
     """
-    return ncon(
-        [np.conj(bin_state), mpo, bin_state],
-        [[1, 2, 5, 4], [2, 3, 5, 6], [1, 3, 6, 4]],
+    return np.einsum(
+        "aikb,ijkl,ajlb->",
+        np.conj(bin_state),
+        mpo,
+        bin_state,
+        optimize=True,
     )
 
 
@@ -337,34 +339,43 @@ def expectation_nbins(ket: np.ndarray, mpo: np.ndarray) -> complex:
     """
     General expectation value for an operator acting on multiple grouped bins.
 
-    This function caches the ncon index pattern for the current operator rank
+    This function caches the einsum subscript string for the current operator rank
     to avoid rebuilding the same index structure repeatedly.
     """
-    rank = len(mpo.shape) + 2
+    ket_rank = ket.ndim
 
-    if expectation_nbins._prev_rank != rank:
-        expectation_nbins._prev_rank = rank
-        half = rank // 2 + 1
+    if expectation_nbins._prev_rank != ket_rank:
+        expectation_nbins._prev_rank = ket_rank
 
-        expectation_nbins._ket = np.concatenate((np.arange(1, half), [rank])).tolist()
-        expectation_nbins._op = np.concatenate(
-            (np.arange(half, rank), np.arange(2, half))
-        ).tolist()
-        expectation_nbins._bra = np.concatenate(
-            ([1], np.arange(half, rank + 1))
-        ).tolist()
+        labels = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        needed = 2 * ket_rank - 2
+        if needed > len(labels):
+            raise ValueError(
+                f"expectation_nbins supports at most {(len(labels) + 2) // 2} tensor rank"
+            )
 
-    return ncon(
-        [np.conj(ket), mpo, ket],
-        [expectation_nbins._ket, expectation_nbins._op, expectation_nbins._bra],
+        left_bond = labels[0]
+        right_bond = labels[ket_rank - 1]
+        bra_phys = labels[1 : ket_rank - 1]
+        ket_phys = labels[ket_rank : ket_rank + ket_rank - 2]
+
+        bra_sub = left_bond + bra_phys + right_bond
+        mpo_sub = bra_phys + ket_phys
+        ket_sub = left_bond + ket_phys + right_bond
+        expectation_nbins._einsum_subscripts = f"{bra_sub},{mpo_sub},{ket_sub}->"
+
+    return np.einsum(
+        expectation_nbins._einsum_subscripts,
+        np.conj(ket),
+        mpo,
+        ket,
+        optimize=True,
     )
 
 
-# cache for expectation_nbins index patterns
+# cache for expectation_nbins contraction pattern
 expectation_nbins._prev_rank = None
-expectation_nbins._ket = None
-expectation_nbins._op = None
-expectation_nbins._bra = None
+expectation_nbins._einsum_subscripts = None
 
 
 def single_time_expectation(normalized_bins: list[np.ndarray], ops_list) -> np.ndarray:

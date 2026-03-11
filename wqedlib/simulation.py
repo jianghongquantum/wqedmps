@@ -9,8 +9,6 @@ It provides time-evolution routines (Markovian and non-Markovian) for systems
 coupled to a 1D field, together with observable
 calculations (populations, correlations, spectra and entanglement).
 
-It requires the module ncon (pip install --user ncon)
-
 """
 
 from dataclasses import dataclass

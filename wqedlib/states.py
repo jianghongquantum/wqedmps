@@ -2,7 +2,6 @@ from __future__ import annotations
 from collections.abc import Iterator
 import numpy as np
 import scipy as sci
-from ncon import ncon
 
 from .parameters import InputParams
 from . import simulation as sim
@@ -423,14 +422,18 @@ def _fock_pulse(
     # build MPS backwards using SVD
     tensors = []
 
-    curr = ncon([calc_ak(pulse_envs[m - 2]), am], [[-1, -2, 1], [1, -3, -4]])
+    curr = np.einsum(
+        "aib,bjc->aijc", calc_ak(pulse_envs[m - 2]), am, optimize=True
+    )
 
     for k in range(m - 2, 1, -1):
         curr, s, right = sim._svd_tensors(curr, bond, d_bin, d_bin)
 
         curr = s[None, None, :] * curr
 
-        curr = ncon([calc_ak(pulse_envs[k - 1]), curr], [[-1, -2, 1], [1, -3, -4]])
+        curr = np.einsum(
+            "aib,bjc->aijc", calc_ak(pulse_envs[k - 1]), curr, optimize=True
+        )
 
         tensors.append(right)
 
@@ -440,7 +443,7 @@ def _fock_pulse(
 
     curr = curr * s[None, None, :]
 
-    curr = ncon([a1, curr], [[-1, -2, 1], [1, -3, -4]])
+    curr = np.einsum("aib,bjc->aijc", a1, curr, optimize=True)
 
     left, s, right = sim._svd_tensors(curr, bond, d_bin, d_bin)
 

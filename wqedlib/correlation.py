@@ -5,13 +5,10 @@ and supporting functions that might be used on such calculated correlation funct
 It provides full two time point correlation calculation, calculation of a single cross sections
 of a two time correlation function, steady state correlation functions, and spectra.
 
-It requires the module ncon (pip install --user ncon)
-
 """
 
 import numpy as np
 import copy
-from ncon import ncon
 
 from wqedlib.simulation import _svd_tensors
 from wqedlib.operators import (
@@ -39,6 +36,29 @@ __all__ = [
     "steady_state_index",
     "correlation_ss_1t",
 ]
+
+
+def _pair_tensor(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    """
+    Merge two neighboring MPS tensors with the shared bond contracted.
+    """
+    return np.einsum("aib,bjc->aijc", left, right, optimize=True)
+
+
+def _swap_pair_tensor(
+    left: np.ndarray, right: np.ndarray, swap: np.ndarray
+) -> np.ndarray:
+    """
+    Contract two neighboring MPS tensors with a rank-4 SWAP gate.
+    """
+    return np.einsum("aib,bjc,xyij->axyc", left, right, swap, optimize=True)
+
+
+def _local_density_matrix(state: np.ndarray) -> np.ndarray:
+    """
+    Reduced single-bin density matrix from a normalized local MPS tensor.
+    """
+    return np.einsum("aib,ajb->ij", state, np.conj(state), optimize=True)
 
 # ----------------------
 # Functions acting on correlation results
@@ -808,10 +828,7 @@ def correlations_2t(
 
     # If the OC is at end of the time bin list, move it to the start (shifts OC from one end to other, index 0)
     for i in range(len(time_bin_list_copy) - 1, 0, -1):
-        bin_contraction = ncon(
-            [time_bin_list_copy[i - 1], time_bin_list_copy[i]],
-            [[-1, -2, 1], [1, -3, -4]],
-        )
+        bin_contraction = _pair_tensor(time_bin_list_copy[i - 1], time_bin_list_copy[i])
         left_bin, stemp, right_bin = _svd_tensors(bin_contraction, bond, d_t, d_t)
         time_bin_list_copy[i] = right_bin  # right normalized system bin
         time_bin_list_copy[i - 1] = left_bin * stemp[None, None, :]  # OC on left bin
@@ -833,14 +850,14 @@ def correlations_2t(
 
         # for the rest of the rows (column by column)
         for j in range(len(time_bin_list_copy) - 1):
-            state = ncon([i_1, i_2], [[-1, -2, 1], [1, -3, -4]])
+            state = _pair_tensor(i_1, i_2)
             for k in range(len(correlations)):
                 correlations[k][i, j + 1] = expectation_nbins(
                     state, ops_two_time[k]
                 )  # this means I'm storing [t,tau]
 
-            swap_gateped_tensor = ncon(
-                [i_1, i_2, swap_gate_matrix], [[-1, 5, 2], [2, 6, -4], [-2, -3, 5, 6]]
+            swap_gateped_tensor = _swap_pair_tensor(
+                i_1, i_2, swap_gate_matrix
             )  # swap_gateping the time bin down the line
             i_t2, stemp, i_t1 = _svd_tensors(swap_gateped_tensor, bond, d_t, d_t)
 
@@ -857,9 +874,8 @@ def correlations_2t(
 
         # after the last value of the column we bring back the first time
         for j in range(len(time_bin_list_copy) - 1, 0, -1):
-            swap_gateped_tensor = ncon(
-                [time_bin_list_copy[j - 1], time_bin_list_copy[j], swap_gate_matrix],
-                [[-1, 5, 2], [2, 6, -4], [-2, -3, 5, 6]],
+            swap_gateped_tensor = _swap_pair_tensor(
+                time_bin_list_copy[j - 1], time_bin_list_copy[j], swap_gate_matrix
             )
             returning_bin, stemp, right_bin = _svd_tensors(
                 swap_gateped_tensor, bond, d_t, d_t
@@ -947,19 +963,15 @@ def correlations_1t(
 
     # Move OC back to t_index, then swap_gate that bin to start of list
     for i in range(size - 1, t_index, -1):
-        bin_contraction = ncon(
-            [time_bin_list_copy[i - 1], time_bin_list_copy[i]],
-            [[-1, -2, 1], [1, -3, -4]],
-        )
+        bin_contraction = _pair_tensor(time_bin_list_copy[i - 1], time_bin_list_copy[i])
         left_bin, stemp, right_bin = _svd_tensors(bin_contraction, bond, d_t, d_t)
         time_bin_list_copy[i] = right_bin  # right normalized system bin
         time_bin_list_copy[i - 1] = left_bin * stemp[None, None, :]  # OC on left bin
 
     # swap_gate bin the t_index bin backwards from t_index -> 0, with the OC
     for i in range(t_index, 0, -1):
-        bin_contraction = ncon(
-            [time_bin_list_copy[i - 1], time_bin_list_copy[i], swap_gate_matrix],
-            [[-1, 5, 1], [1, 6, -4], [-2, -3, 5, 6]],
+        bin_contraction = _swap_pair_tensor(
+            time_bin_list_copy[i - 1], time_bin_list_copy[i], swap_gate_matrix
         )
         left_bin, stemp, right_bin = _svd_tensors(bin_contraction, bond, d_t, d_t)
         time_bin_list_copy[i] = right_bin  # right normalized system bin
@@ -969,15 +981,13 @@ def correlations_1t(
     for i in range(0, size - 1):
         i_1 = time_bin_list_copy[i]
         i_2 = time_bin_list_copy[i + 1]
-        state = ncon([i_1, i_2], [[-1, -2, 1], [1, -3, -4]])
+        state = _pair_tensor(i_1, i_2)
 
         # Calculate each two time point op
         for j in range(len(ops_two_time)):
             correlations[j][i] = expectation_nbins(state, ops_two_time[j])
 
-        swap_gates = ncon(
-            [i_1, i_2, swap_gate_matrix], [[-1, 5, 2], [2, 6, -4], [-2, -3, 5, 6]]
-        )
+        swap_gates = _swap_pair_tensor(i_1, i_2, swap_gate_matrix)
         i_t1, stemp, i_t2 = _svd_tensors(swap_gates, bond, d_t, d_t)
 
         # Now put OC in the right bin, i_t2, to move it up the chain
@@ -1086,19 +1096,10 @@ def steady_state_index(
     contracted_bins = np.empty((bin_num, bin_dim, bin_dim), dtype=complex)
     # TODO Maybe in future have density matrix function
     contracted_bins[: window - 1] = np.stack(
-        [
-            ncon(
-                [output_field_states[i], np.conj(output_field_states[i])],
-                [[1, -1, 2], [1, -2, 2]],
-            )
-            for i in range(window - 1)
-        ]
+        [_local_density_matrix(output_field_states[i]) for i in range(window - 1)]
     )
     for i in range(window, bin_num):
-        contracted_bins[i] = ncon(
-            [output_field_states[i], np.conj(output_field_states[i])],
-            [[1, -1, 2], [1, -2, 2]],
-        )
+        contracted_bins[i] = _local_density_matrix(output_field_states[i])
 
         # Check if [i-window:i] bins are close in contents
         tail = contracted_bins[i - window : i]
@@ -1197,10 +1198,7 @@ def correlation_ss_1t(
 
     # Move OC back to t, then forward for positive taus
     for i in range(size - 1, 0, -1):
-        bin_contraction = ncon(
-            [time_bin_list_copy[i - 1], time_bin_list_copy[i]],
-            [[-1, -2, 1], [1, -3, -4]],
-        )
+        bin_contraction = _pair_tensor(time_bin_list_copy[i - 1], time_bin_list_copy[i])
         left_bin, stemp, right_bin = _svd_tensors(bin_contraction, bond, d_t, d_t)
         time_bin_list_copy[i] = right_bin  # right normalized system bin
         time_bin_list_copy[i - 1] = left_bin * stemp[None, None, :]  # OC on left bin
@@ -1213,15 +1211,13 @@ def correlation_ss_1t(
     for i in range(1, size):
         i_1 = time_bin_list_copy[i - 1]
         i_2 = time_bin_list_copy[i]
-        state = ncon([i_1, i_2], [[-1, -2, 1], [1, -3, -4]])
+        state = _pair_tensor(i_1, i_2)
 
         # Calculate each two time point op
         for j in range(len(ops_two_time)):
             correlations[j][i] = expectation_nbins(state, ops_two_time[j])
 
-        swap_gates = ncon(
-            [i_1, i_2, swap_gate_matrix], [[-1, 5, 2], [2, 6, -4], [-2, -3, 5, 6]]
-        )
+        swap_gates = _swap_pair_tensor(i_1, i_2, swap_gate_matrix)
         i_t1, stemp, i_t2 = _svd_tensors(swap_gates, bond, d_t, d_t)
 
         # Now put OC in the right bin, i_t2, to move it up the chain
