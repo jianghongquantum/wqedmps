@@ -14,7 +14,6 @@ calculations (populations, correlations, spectra and entanglement).
 from dataclasses import dataclass
 import numpy as np
 
-from scipy.linalg import svd, norm
 from wqedlib import states as states
 from collections.abc import Iterator
 from wqedlib.parameters import InputParams, Bins
@@ -25,51 +24,6 @@ from wqedlib.operators import u_evol, swap_gate
 from seemps.state import CanonicalMPS, DEFAULT_STRATEGY
 
 __all__ = ["t_evol_mar_seemps", "t_evol_nmar_seemps", "BinsSeemps", "BinsSeempsNMar"]
-
-
-# -----------------------------------
-# Singular Value Decomposition helper
-# -----------------------------------
-def _svd_tensors(tensor: np.ndarray, bond_max: int, d_1: int, d_2: int) -> np.ndarray:
-    """
-    Perform a SVD, reshape the tensors and return left tensor,
-    normalized Schmidt vector, and right tensor.
-
-    Parameters
-    ----------
-    tensor : ndarray
-        tensor to decompose
-
-    bond_max : int
-        max. bond dimension
-
-    d_1 : int
-        physical dimension of first tensor
-
-    d_2 : int
-        physical dimension of second tensor
-
-    Returns
-    -------
-    u : ndarray
-        left normalized tensor
-
-    s_norm : ndarray
-        smichdt coefficients normalized
-
-    vt : ndarray
-        transposed right normalized tensor
-    """
-    u, s, vt = svd(
-        tensor.reshape(tensor.shape[0] * d_1, tensor.shape[-1] * d_2),
-        full_matrices=False,
-    )
-    chi = min(bond_max, len(s))
-    epsilon = 1e-12  # to avoid dividing by zero
-    s_norm = s[:chi] / (norm(s[:chi]) + epsilon)
-    u = u[:, :chi].reshape(tensor.shape[0], d_1, chi)
-    vt = vt[:chi, :].reshape(chi, d_2, tensor.shape[-1])
-    return u, s_norm, vt
 
 
 # ============================================================

@@ -10,7 +10,6 @@ of a two time correlation function, steady state correlation functions, and spec
 import numpy as np
 import copy
 
-from wqedlib.simulation import _svd_tensors
 from wqedlib.operators import (
     op_list_check,
     expectation_1bin,
@@ -19,6 +18,7 @@ from wqedlib.operators import (
     single_time_expectation,
 )
 from wqedlib.parameters import InputParams
+from seemps.state import CanonicalMPS, DEFAULT_STRATEGY
 
 __all__ = [
     "spectrum_w",
@@ -59,6 +59,42 @@ def _local_density_matrix(state: np.ndarray) -> np.ndarray:
     Reduced single-bin density matrix from a normalized local MPS tensor.
     """
     return np.einsum("aib,ajb->ij", state, np.conj(state), optimize=True)
+
+
+def _split_pair_left(
+    theta: np.ndarray,
+    left: np.ndarray,
+    right: np.ndarray,
+    strategy,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Split a two-site tensor and keep the orthogonality center on the left site.
+    """
+    mps_pair = CanonicalMPS(
+        [np.array(left, copy=True), np.array(right, copy=True)],
+        center=0,
+        normalize=False,
+    )
+    mps_pair.update_2site_left(theta, 0, strategy)
+    return np.array(mps_pair[0], copy=True), np.array(mps_pair[1], copy=True)
+
+
+def _split_pair_right(
+    theta: np.ndarray,
+    left: np.ndarray,
+    right: np.ndarray,
+    strategy,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Split a two-site tensor and keep the orthogonality center on the right site.
+    """
+    mps_pair = CanonicalMPS(
+        [np.array(left, copy=True), np.array(right, copy=True)],
+        center=0,
+        normalize=False,
+    )
+    mps_pair.update_2site_right(theta, 0, strategy)
+    return np.array(mps_pair[0], copy=True), np.array(mps_pair[1], copy=True)
 
 # ----------------------
 # Functions acting on correlation results
@@ -809,8 +845,11 @@ def correlations_2t(
         List of time points for the t and t' axes for the calculated correlation functions.
     """
     d_t_total = params.d_t_total
-    bond = params.bond_max
     d_t = np.prod(d_t_total)
+    strategy = DEFAULT_STRATEGY.replace(
+        tolerance=getattr(params, "atol", 1e-12),
+        max_bond_dimension=params.bond_max,
+    )
 
     time_bin_list_copy = copy.deepcopy(correlation_bins)
     swap_gate_matrix = swap_gate(d_t, d_t)
@@ -829,9 +868,14 @@ def correlations_2t(
     # If the OC is at end of the time bin list, move it to the start (shifts OC from one end to other, index 0)
     for i in range(len(time_bin_list_copy) - 1, 0, -1):
         bin_contraction = _pair_tensor(time_bin_list_copy[i - 1], time_bin_list_copy[i])
-        left_bin, stemp, right_bin = _svd_tensors(bin_contraction, bond, d_t, d_t)
+        left_bin, right_bin = _split_pair_left(
+            bin_contraction,
+            time_bin_list_copy[i - 1],
+            time_bin_list_copy[i],
+            strategy,
+        )
         time_bin_list_copy[i] = right_bin  # right normalized system bin
-        time_bin_list_copy[i - 1] = left_bin * stemp[None, None, :]  # OC on left bin
+        time_bin_list_copy[i - 1] = left_bin  # OC on left bin
 
     # Loop over to fill in correlation matrices values
     if completion_print_flag:
@@ -859,9 +903,7 @@ def correlations_2t(
             swap_gateped_tensor = _swap_pair_tensor(
                 i_1, i_2, swap_gate_matrix
             )  # swap_gateping the time bin down the line
-            i_t2, stemp, i_t1 = _svd_tensors(swap_gateped_tensor, bond, d_t, d_t)
-
-            i_1 = stemp[:, None, None] * i_t1  # OC tau bin
+            i_t2, i_1 = _split_pair_right(swap_gateped_tensor, i_1, i_2, strategy)
 
             if j < (len(time_bin_list_copy) - 2):
                 i_2 = time_bin_list_copy[
@@ -877,18 +919,19 @@ def correlations_2t(
             swap_gateped_tensor = _swap_pair_tensor(
                 time_bin_list_copy[j - 1], time_bin_list_copy[j], swap_gate_matrix
             )
-            returning_bin, stemp, right_bin = _svd_tensors(
-                swap_gateped_tensor, bond, d_t, d_t
+            returning_bin, right_bin = _split_pair_left(
+                swap_gateped_tensor,
+                time_bin_list_copy[j - 1],
+                time_bin_list_copy[j],
+                strategy,
             )
             if j > 1:
                 # timeBinListCopy[j] = vt[range(chi),:].reshape(chi,dTime,timeBinListCopy[i].shape[-1]) #right normalized system bin
                 time_bin_list_copy[j] = right_bin  # right normalized system bin
-                time_bin_list_copy[j - 1] = (
-                    returning_bin * stemp[None, None, :]
-                )  # OC on left bin
+                time_bin_list_copy[j - 1] = returning_bin  # OC on left bin
             # Final iteration drop the returning bin
             if j == 1:
-                time_bin_list_copy[j] = stemp[:, None, None] * right_bin
+                time_bin_list_copy[j] = right_bin
         time_bin_list_copy = time_bin_list_copy[
             1:
         ]  # Truncating the start of the list now that are done with that bin (t=i)
@@ -940,9 +983,12 @@ def correlations_1t(
         List of time points for the t' axis at which the two time point correlation functions are taken.
     """
     d_t_total = params.d_t_total
-    bond = params.bond_max
     delta_t = params.delta_t
     d_t = np.prod(d_t_total)
+    strategy = DEFAULT_STRATEGY.replace(
+        tolerance=getattr(params, "atol", 1e-12),
+        max_bond_dimension=params.bond_max,
+    )
 
     t_index = int(round(t / delta_t, 0))
 
@@ -964,18 +1010,28 @@ def correlations_1t(
     # Move OC back to t_index, then swap_gate that bin to start of list
     for i in range(size - 1, t_index, -1):
         bin_contraction = _pair_tensor(time_bin_list_copy[i - 1], time_bin_list_copy[i])
-        left_bin, stemp, right_bin = _svd_tensors(bin_contraction, bond, d_t, d_t)
+        left_bin, right_bin = _split_pair_left(
+            bin_contraction,
+            time_bin_list_copy[i - 1],
+            time_bin_list_copy[i],
+            strategy,
+        )
         time_bin_list_copy[i] = right_bin  # right normalized system bin
-        time_bin_list_copy[i - 1] = left_bin * stemp[None, None, :]  # OC on left bin
+        time_bin_list_copy[i - 1] = left_bin  # OC on left bin
 
     # swap_gate bin the t_index bin backwards from t_index -> 0, with the OC
     for i in range(t_index, 0, -1):
         bin_contraction = _swap_pair_tensor(
             time_bin_list_copy[i - 1], time_bin_list_copy[i], swap_gate_matrix
         )
-        left_bin, stemp, right_bin = _svd_tensors(bin_contraction, bond, d_t, d_t)
+        left_bin, right_bin = _split_pair_left(
+            bin_contraction,
+            time_bin_list_copy[i - 1],
+            time_bin_list_copy[i],
+            strategy,
+        )
         time_bin_list_copy[i] = right_bin  # right normalized system bin
-        time_bin_list_copy[i - 1] = left_bin * stemp[None, None, :]  # OC on left bin
+        time_bin_list_copy[i - 1] = left_bin  # OC on left bin
 
     # Calculate the rest of the points
     for i in range(0, size - 1):
@@ -988,10 +1044,10 @@ def correlations_1t(
             correlations[j][i] = expectation_nbins(state, ops_two_time[j])
 
         swap_gates = _swap_pair_tensor(i_1, i_2, swap_gate_matrix)
-        i_t1, stemp, i_t2 = _svd_tensors(swap_gates, bond, d_t, d_t)
+        _, i_t2 = _split_pair_right(swap_gates, i_1, i_2, strategy)
 
         # Now put OC in the right bin, i_t2, to move it up the chain
-        time_bin_list_copy[i + 1] = stemp[:, None, None] * i_t2  # OC on right bin
+        time_bin_list_copy[i + 1] = i_t2  # OC on right bin
 
     # Calculate the single same time point
     # Shift values above t_index to the right to prepare for insertion
@@ -1167,9 +1223,12 @@ def correlation_ss_1t(
         Time that steady state is reached.
     """
     d_t_total = params.d_t_total
-    bond = params.bond_max
     delta_t = params.delta_t
     d_t = np.prod(d_t_total)
+    strategy = DEFAULT_STRATEGY.replace(
+        tolerance=getattr(params, "atol", 1e-12),
+        max_bond_dimension=params.bond_max,
+    )
 
     time_bin_list_copy = copy.deepcopy(
         correlation_bins
@@ -1200,9 +1259,14 @@ def correlation_ss_1t(
     # Move OC back to t, then forward for positive taus
     for i in range(size - 1, 0, -1):
         bin_contraction = _pair_tensor(time_bin_list_copy[i - 1], time_bin_list_copy[i])
-        left_bin, stemp, right_bin = _svd_tensors(bin_contraction, bond, d_t, d_t)
+        left_bin, right_bin = _split_pair_left(
+            bin_contraction,
+            time_bin_list_copy[i - 1],
+            time_bin_list_copy[i],
+            strategy,
+        )
         time_bin_list_copy[i] = right_bin  # right normalized system bin
-        time_bin_list_copy[i - 1] = left_bin * stemp[None, None, :]  # OC on left bin
+        time_bin_list_copy[i - 1] = left_bin  # OC on left bin
 
     # Calculate the single same time point
     for j in range(len(ops_same_time)):
@@ -1219,10 +1283,10 @@ def correlation_ss_1t(
             correlations[j][i] = expectation_nbins(state, ops_two_time[j])
 
         swap_gates = _swap_pair_tensor(i_1, i_2, swap_gate_matrix)
-        i_t1, stemp, i_t2 = _svd_tensors(swap_gates, bond, d_t, d_t)
+        _, i_t2 = _split_pair_right(swap_gates, i_1, i_2, strategy)
 
         # Now put OC in the right bin, i_t2, to move it up the chain
-        time_bin_list_copy[i] = stemp[:, None, None] * i_t2  # OC on right bin
+        time_bin_list_copy[i] = i_t2  # OC on right bin
 
     tau_list = np.arange(size) * delta_t
     return correlations, tau_list, t_steady
