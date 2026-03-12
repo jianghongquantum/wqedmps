@@ -31,12 +31,6 @@ __all__ = [
     "hamiltonian_1tls_cavity_nmar",
     "Hamiltonian",
 ]
-
-
-def _is_array_drive(x) -> bool:
-    return isinstance(x, np.ndarray)
-
-
 def _resolve_two_leg_couplings(
     gamma_primary: float,
     gamma_secondary: float,
@@ -97,7 +91,7 @@ def hamiltonian_1tls(
         np.kron(sm, a_dag_r(d_t_total)) + np.kron(sp, a_r(d_t_total))
     )
 
-    if _is_array_drive(omega):
+    if isinstance(omega, np.ndarray):
         omega = np.asarray(omega, dtype=float)
 
         def hm_total(t_k: int) -> np.ndarray:
@@ -157,7 +151,7 @@ def hamiltonian_1tls_feedback(
         np.kron(np.kron(I_t, sp), a_now) + np.kron(np.kron(I_t, sm), adag_now)
     )
 
-    if _is_array_drive(omega):
+    if isinstance(omega, np.ndarray):
         omega = np.asarray(omega, dtype=float)
 
         def hm_total(t_k: int) -> np.ndarray:
@@ -231,36 +225,56 @@ def hamiltonian_2tls_mar(
         np.kron(sm2, a_dag_l(d_t_total)) + np.kron(sp2, a_l(d_t_total))
     )
 
-    def _sys_part(w1: float, w2: float) -> np.ndarray:
-        Hs = delta1 * e1 + delta2 * e2 + 0.5 * w1 * (sp1 + sm1) + 0.5 * w2 * (sp2 + sm2)
-        return np.kron(Hs, I_t)
-
-    if _is_array_drive(omega1) and _is_array_drive(omega2):
+    if isinstance(omega1, np.ndarray) and isinstance(omega2, np.ndarray):
         omega1 = np.asarray(omega1, dtype=float)
         omega2 = np.asarray(omega2, dtype=float)
 
         def hm_total(t_k: int) -> np.ndarray:
+            Hs = (
+                delta1 * e1
+                + delta2 * e2
+                + 0.5 * omega1[t_k] * (sp1 + sm1)
+                + 0.5 * omega2[t_k] * (sp2 + sm2)
+            )
             return (
-                _sys_part(omega1[t_k], omega2[t_k]) + H_1r + H_1l + H_2r + H_2l
+                np.kron(Hs, I_t) + H_1r + H_1l + H_2r + H_2l
             ) * delta_t
 
-    elif _is_array_drive(omega1):
+    elif isinstance(omega1, np.ndarray):
         omega1 = np.asarray(omega1, dtype=float)
         w2 = float(omega2)
 
         def hm_total(t_k: int) -> np.ndarray:
-            return (_sys_part(omega1[t_k], w2) + H_1r + H_1l + H_2r + H_2l) * delta_t
+            Hs = (
+                delta1 * e1
+                + delta2 * e2
+                + 0.5 * omega1[t_k] * (sp1 + sm1)
+                + 0.5 * w2 * (sp2 + sm2)
+            )
+            return (np.kron(Hs, I_t) + H_1r + H_1l + H_2r + H_2l) * delta_t
 
-    elif _is_array_drive(omega2):
+    elif isinstance(omega2, np.ndarray):
         omega2 = np.asarray(omega2, dtype=float)
         w1 = float(omega1)
 
         def hm_total(t_k: int) -> np.ndarray:
-            return (_sys_part(w1, omega2[t_k]) + H_1r + H_1l + H_2r + H_2l) * delta_t
+            Hs = (
+                delta1 * e1
+                + delta2 * e2
+                + 0.5 * w1 * (sp1 + sm1)
+                + 0.5 * omega2[t_k] * (sp2 + sm2)
+            )
+            return (np.kron(Hs, I_t) + H_1r + H_1l + H_2r + H_2l) * delta_t
 
     else:
+        Hs = (
+            delta1 * e1
+            + delta2 * e2
+            + 0.5 * float(omega1) * (sp1 + sm1)
+            + 0.5 * float(omega2) * (sp2 + sm2)
+        )
         hm_total = (
-            _sys_part(float(omega1), float(omega2)) + H_1r + H_1l + H_2r + H_2l
+            np.kron(Hs, I_t) + H_1r + H_1l + H_2r + H_2l
         ) * delta_t
 
     return hm_total
@@ -325,36 +339,56 @@ def hamiltonian_2tls_nmar(
         np.kron(np.kron(I_t, sm1), adag_bin) + np.kron(np.kron(I_t, sp1), a_bin)
     )
 
-    def _sys_part(w1: float, w2: float) -> np.ndarray:
-        Hs = delta1 * e1 + delta2 * e2 + 0.5 * w1 * (sp1 + sm1) + 0.5 * w2 * (sp2 + sm2)
-        return np.kron(np.kron(I_t, Hs), I_t)
-
-    if _is_array_drive(omega1) and _is_array_drive(omega2):
+    if isinstance(omega1, np.ndarray) and isinstance(omega2, np.ndarray):
         omega1 = np.asarray(omega1, dtype=float)
         omega2 = np.asarray(omega2, dtype=float)
 
         def hm_total(t_k: int) -> np.ndarray:
+            Hs = (
+                delta1 * e1
+                + delta2 * e2
+                + 0.5 * omega1[t_k] * (sp1 + sm1)
+                + 0.5 * omega2[t_k] * (sp2 + sm2)
+            )
             return (
-                _sys_part(omega1[t_k], omega2[t_k]) + H_11 + H_21 + H_12 + H_22
+                np.kron(np.kron(I_t, Hs), I_t) + H_11 + H_21 + H_12 + H_22
             ) * delta_t
 
-    elif _is_array_drive(omega1):
+    elif isinstance(omega1, np.ndarray):
         omega1 = np.asarray(omega1, dtype=float)
         w2 = float(omega2)
 
         def hm_total(t_k: int) -> np.ndarray:
-            return (_sys_part(omega1[t_k], w2) + H_11 + H_21 + H_12 + H_22) * delta_t
+            Hs = (
+                delta1 * e1
+                + delta2 * e2
+                + 0.5 * omega1[t_k] * (sp1 + sm1)
+                + 0.5 * w2 * (sp2 + sm2)
+            )
+            return (np.kron(np.kron(I_t, Hs), I_t) + H_11 + H_21 + H_12 + H_22) * delta_t
 
-    elif _is_array_drive(omega2):
+    elif isinstance(omega2, np.ndarray):
         omega2 = np.asarray(omega2, dtype=float)
         w1 = float(omega1)
 
         def hm_total(t_k: int) -> np.ndarray:
-            return (_sys_part(w1, omega2[t_k]) + H_11 + H_21 + H_12 + H_22) * delta_t
+            Hs = (
+                delta1 * e1
+                + delta2 * e2
+                + 0.5 * w1 * (sp1 + sm1)
+                + 0.5 * omega2[t_k] * (sp2 + sm2)
+            )
+            return (np.kron(np.kron(I_t, Hs), I_t) + H_11 + H_21 + H_12 + H_22) * delta_t
 
     else:
+        Hs = (
+            delta1 * e1
+            + delta2 * e2
+            + 0.5 * float(omega1) * (sp1 + sm1)
+            + 0.5 * float(omega2) * (sp2 + sm2)
+        )
         hm_total = (
-            _sys_part(float(omega1), float(omega2)) + H_11 + H_21 + H_12 + H_22
+            np.kron(np.kron(I_t, Hs), I_t) + H_11 + H_21 + H_12 + H_22
         ) * delta_t
 
     return hm_total
@@ -430,18 +464,16 @@ def hamiltonian_1tls_giant_open_nmar(
         + np.kron(np.kron(a_r(d_t_total) * np.exp(-1j * phase), sp), I_t)
     )
 
-    def _sys_part(w: float) -> np.ndarray:
-        Hs = delta * pe + 0.5 * w * (sp + sm)
-        return np.kron(np.kron(I_t, Hs), I_t)
-
-    if _is_array_drive(omega):
+    if isinstance(omega, np.ndarray):
         omega = np.asarray(omega, dtype=float)
 
         def hm_total(t_k: int) -> np.ndarray:
-            return (_sys_part(omega[t_k]) + H_leg1 + H_leg2) * delta_t
+            Hs = delta * pe + 0.5 * omega[t_k] * (sp + sm)
+            return (np.kron(np.kron(I_t, Hs), I_t) + H_leg1 + H_leg2) * delta_t
 
     else:
-        hm_total = (_sys_part(float(omega)) + H_leg1 + H_leg2) * delta_t
+        Hs = delta * pe + 0.5 * float(omega) * (sp + sm)
+        hm_total = (np.kron(np.kron(I_t, Hs), I_t) + H_leg1 + H_leg2) * delta_t
 
     return hm_total
 
@@ -509,22 +541,25 @@ def hamiltonian_1tls_cavity_nmar(
         + np.kron(np.kron(I_t, cav_a), adag_bin)
     )
 
-    def _sys_part(w: float) -> np.ndarray:
+    if isinstance(omega, np.ndarray):
+        omega = np.asarray(omega, dtype=float)
+
+        def hm_total(t_k: int) -> np.ndarray:
+            Hs = (
+                delta_atom * pe
+                + delta_cavity * cav_n
+                + g * (cav_adag @ sm + cav_a @ sp)
+                + 0.5 * omega[t_k] * (sp + sm)
+            )
+            return (np.kron(np.kron(I_t, Hs), I_t) + H_fb + H_now) * delta_t
+
+    else:
         Hs = (
             delta_atom * pe
             + delta_cavity * cav_n
             + g * (cav_adag @ sm + cav_a @ sp)
-            + 0.5 * w * (sp + sm)
+            + 0.5 * float(omega) * (sp + sm)
         )
-        return np.kron(np.kron(I_t, Hs), I_t)
-
-    if _is_array_drive(omega):
-        omega = np.asarray(omega, dtype=float)
-
-        def hm_total(t_k: int) -> np.ndarray:
-            return (_sys_part(omega[t_k]) + H_fb + H_now) * delta_t
-
-    else:
-        hm_total = (_sys_part(float(omega)) + H_fb + H_now) * delta_t
+        hm_total = (np.kron(np.kron(I_t, Hs), I_t) + H_fb + H_now) * delta_t
 
     return hm_total
