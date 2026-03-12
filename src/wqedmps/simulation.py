@@ -13,11 +13,14 @@ calculations (populations, correlations, spectra and entanglement).
 
 import numpy as np
 
-from seemps.state.schmidt import _left_orth_2site, _right_orth_2site, _schmidt_weights
+from seemps.state.schmidt import _schmidt_weights
+
 from wqedmps import states as states
 from wqedmps.mps_tools import (
     contract_cached,
     pair_tensor,
+    split_pair_left,
+    split_pair_right,
     strategy_from_params,
     swap_pair_tensor,
     swap_theta,
@@ -28,6 +31,14 @@ from wqedmps.operators import *
 from wqedmps.operators import u_evol
 
 __all__ = ["t_evol_mar_seemps", "t_evol_nmar_seemps"]
+
+
+def _observable_copy(tensor: np.ndarray) -> np.ndarray:
+    snapshot = tensor.copy()
+    norm = float(np.linalg.norm(snapshot))
+    if norm > 0.0 and not np.isclose(norm, 1.0):
+        snapshot /= norm
+    return snapshot
 
 
 def t_evol_mar_seemps(
@@ -127,19 +138,20 @@ def t_evol_mar_seemps(
         # --------------------------------------------------------
         # Store the input bin with orthogonality center on the bin
         # --------------------------------------------------------
-        # Merge the two local tensors
+        # SeeMPS may overwrite the tensor passed into a split, so keep
+        # one copy for the observable snapshot and one for the interaction.
         theta_in = pair_tensor(psi_sys, input_bin)
         theta = theta_in.copy()
 
         # Split the pair and move the center to the input-bin site
-        _, input_bin_centered, _ = _left_orth_2site(theta_in, strategy)
-        input_field_states.append(input_bin_centered.copy())
+        _, input_bin_centered = split_pair_right(theta_in, strategy)
+        input_field_states.append(_observable_copy(input_bin_centered))
 
         # --------------------------------------------------------
         # System–bin interaction
         # --------------------------------------------------------
         theta = contract_cached("pqij,aijb->apqb", U_int, theta)
-        system_left, input_bin_after_interaction, _ = _left_orth_2site(theta, strategy)
+        system_left, input_bin_after_interaction = split_pair_right(theta, strategy)
 
         # --------------------------------------------------------
         # Swap system and bin
@@ -150,7 +162,7 @@ def t_evol_mar_seemps(
         theta = swap_theta(pair_tensor(system_left, input_bin_after_interaction))
         theta_centered_on_output = theta.copy()
 
-        correlation_tensor, system_tensor, _ = _left_orth_2site(theta, strategy)
+        correlation_tensor, system_tensor = split_pair_right(theta, strategy)
 
         # --------------------------------------------------------
         # Schmidt values across the active cut
@@ -163,12 +175,12 @@ def t_evol_mar_seemps(
         # --------------------------------------------------------
         # Store system and emitted bin tensors
         # --------------------------------------------------------
-        system_tensor = system_tensor.copy()
+        system_tensor_observable = _observable_copy(system_tensor)
         correlation_tensor = correlation_tensor.copy()
-        output_bin_tensor, _, _ = _right_orth_2site(theta_centered_on_output, strategy)
-        output_bin_tensor = output_bin_tensor.copy()
+        output_bin_tensor, _ = split_pair_left(theta_centered_on_output, strategy)
+        output_bin_tensor = _observable_copy(output_bin_tensor)
 
-        system_states.append(system_tensor)
+        system_states.append(system_tensor_observable)
         output_field_states.append(output_bin_tensor)
         correlation_bins.append(correlation_tensor)
 
@@ -289,7 +301,7 @@ def t_evol_nmar_seemps(
             next_bin = delay_line[j + 1]
             theta = swap_pair_tensor(feedback_bin, next_bin)
 
-            left_bin, right_bin, _ = _left_orth_2site(theta, strategy)
+            left_bin, right_bin = split_pair_right(theta, strategy)
             delay_line[j] = left_bin
             feedback_bin = right_bin
 
@@ -297,7 +309,7 @@ def t_evol_nmar_seemps(
         # 2. Combine [feedback | system]
         # --------------------------------------------------------
         theta = pair_tensor(feedback_bin, system_tensor)
-        feedback_left, system_tensor, _ = _left_orth_2site(theta, strategy)
+        feedback_left, system_tensor = split_pair_right(theta, strategy)
 
         # --------------------------------------------------------
         # 3. Read current input bin
@@ -306,9 +318,8 @@ def t_evol_nmar_seemps(
 
         # store with center on bin
         theta_in = pair_tensor(system_tensor, input_bin)
-        system_left, input_bin_oc, _ = _left_orth_2site(theta_in, strategy)
-
-        input_field_states.append(input_bin_oc)
+        system_left, input_bin_oc = split_pair_right(theta_in, strategy)
+        input_field_states.append(_observable_copy(input_bin_oc))
 
         # --------------------------------------------------------
         # 4. Local interaction
@@ -326,43 +337,44 @@ def t_evol_nmar_seemps(
         # --------------------------------------------------------
         theta = theta.reshape(theta.shape[0], d_bin, d_sys * d_bin, theta.shape[-1])
 
-        feedback_left_new, rest_oc, _ = _left_orth_2site(theta, strategy)
+        feedback_left_new, rest_oc = split_pair_right(theta, strategy)
 
         # --------------------------------------------------------
         # 6. Split [system | loop]
         # --------------------------------------------------------
         theta = rest_oc.reshape(rest_oc.shape[0], d_sys, d_bin, rest_oc.shape[-1])
 
-        system_tensor_centered, loop_bin, _ = _right_orth_2site(theta, strategy)
-
-        system_states.append(system_tensor_centered)
+        system_tensor_centered, loop_bin = split_pair_left(theta, strategy)
+        system_states.append(_observable_copy(system_tensor_centered))
 
         # --------------------------------------------------------
         # 7. Swap [system | loop] → [loop | system]
         # --------------------------------------------------------
         theta = swap_pair_tensor(system_tensor_centered, loop_bin)
 
-        loop_bin_centered, system_tensor, _ = _right_orth_2site(theta, strategy)
+        loop_bin_centered, system_tensor = split_pair_left(theta, strategy)
 
         # --------------------------------------------------------
         # 8. Attach loop bin to feedback branch
         # --------------------------------------------------------
         theta = pair_tensor(feedback_left_new, loop_bin_centered)
 
+        # Keep a second copy because the same pair is split twice with
+        # different orthogonality-center positions.
         theta_centered_on_feedback = theta.copy()
-        feedback_left_mid, loop_bin_oc, _ = _left_orth_2site(theta, strategy)
+        feedback_left_mid, loop_bin_oc = split_pair_right(theta, strategy)
 
         w_fb = _schmidt_weights(loop_bin_oc)
         schmidt.append(np.sqrt(np.maximum(w_fb, 0))[: params.bond_max])
         bond_dims.append(int(feedback_left_mid.shape[2]))
 
         # Re-split the same pair with the center on the feedback bin.
-        feedback_bin_centered, loop_bin_internal, _ = _right_orth_2site(
+        feedback_bin_centered, loop_bin_internal = split_pair_left(
             theta_centered_on_feedback, strategy
         )
 
-        output_field_states.append(feedback_bin_centered)
-        loop_field_states.append(loop_bin_oc)
+        output_field_states.append(_observable_copy(feedback_bin_centered))
+        loop_field_states.append(_observable_copy(loop_bin_oc))
 
         delay_line[step + delay_steps - 1] = feedback_bin_centered
         delay_line.append(loop_bin_internal)
@@ -374,7 +386,7 @@ def t_evol_nmar_seemps(
             schmidt_tau.append(np.array([1.0]))
             bond_dims_tau.append(1)
             correlation_bins.append(feedback_left_mid)
-            last_feedback_center = feedback_bin_centered
+            last_feedback_center = output_field_states[-1].copy()
 
         else:
             current_feedback = feedback_bin_centered
@@ -384,8 +396,9 @@ def t_evol_nmar_seemps(
                 prev_bin = delay_line[j - 1]
                 theta = swap_pair_tensor(prev_bin, current_feedback)
 
+                # The final pair is reused below to store the correlation bin.
                 theta_centered_on_delay = theta.copy()
-                current_feedback, right_bin, _ = _right_orth_2site(theta, strategy)
+                current_feedback, right_bin = split_pair_left(theta, strategy)
 
                 delay_line[j] = right_bin
 
@@ -393,12 +406,12 @@ def t_evol_nmar_seemps(
             schmidt_tau.append(np.sqrt(np.maximum(w_tau, 0.0))[: params.bond_max])
             bond_dims_tau.append(int(current_feedback.shape[2]))
 
-            correlation_tensor, delayed_bin, _ = _left_orth_2site(
+            correlation_tensor, delayed_bin = split_pair_right(
                 theta_centered_on_delay, strategy
             )
             delay_line[step + 1] = delayed_bin
             correlation_bins.append(correlation_tensor)
-            last_feedback_center = current_feedback
+            last_feedback_center = _observable_copy(current_feedback)
 
     # ------------------------------------------------------------
     # Replace the final correlation entry with the feedback-bin tensor carrying
