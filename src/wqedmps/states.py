@@ -1,5 +1,5 @@
 from __future__ import annotations
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 import numpy as np
 import scipy as sci
 
@@ -135,13 +135,20 @@ def vacuum(time_length: float, params: InputParams) -> list[np.ndarray]:
 
 def input_state_generator(
     d_t_total,
-    input_bins: list[np.ndarray] | None = None,
+    input_bins: np.ndarray | Sequence[np.ndarray] | None = None,
     bond0: int = 1,
     default_state: np.ndarray | None = None,
 ) -> Iterator[np.ndarray]:
     d_t = int(np.prod(d_t_total))
 
-    for tensor in [] if input_bins is None else input_bins:
+    if input_bins is None:
+        prepared_bins: list[np.ndarray] = []
+    elif isinstance(input_bins, np.ndarray):
+        prepared_bins = [np.asarray(input_bins, dtype=complex)]
+    else:
+        prepared_bins = [np.asarray(tensor, dtype=complex) for tensor in input_bins]
+
+    for tensor in prepared_bins:
         yield tensor
 
     filler = wg_ground(d_t) if default_state is None else default_state

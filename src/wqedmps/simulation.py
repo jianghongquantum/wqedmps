@@ -33,7 +33,7 @@ __all__ = ["t_evol_mar_seemps", "t_evol_nmar_seemps"]
 def t_evol_mar_seemps(
     ham: Hamiltonian,
     i_s0: np.ndarray,
-    i_n0: np.ndarray,
+    i_n0: np.ndarray | list[np.ndarray],
     params: InputParams,
 ) -> Bins:
     """
@@ -63,7 +63,9 @@ def t_evol_mar_seemps(
         Initial system tensor.
 
     i_n0
-        Initial input time-bin tensor.
+        Initial waveguide state. This can be either a single input-bin tensor
+        or a full list of input-bin tensors, such as the output of
+        ``states.vacuum(...)`` or ``states.fock_pulse(...)``.
 
     params
         Simulation parameters (delta_t, tmax, bond_max, etc.).
@@ -87,10 +89,10 @@ def t_evol_mar_seemps(
     times = np.arange(n_steps + 1) * delta_t
 
     # Input field generator:
-    # yields i_n0 first and vacuum bins afterwards
+    # yields the supplied initial waveguide bins first and vacuum bins afterwards
     input_field = states.input_state_generator(
         params.d_t_total,
-        input_bins=[np.asarray(i_n0, dtype=complex)],
+        input_bins=i_n0,
     )
 
     # ------------------------------------------------------------
@@ -197,7 +199,7 @@ def t_evol_mar_seemps(
 def t_evol_nmar_seemps(
     ham: Hamiltonian,
     i_s0: np.ndarray,
-    i_n0: np.ndarray,
+    i_n0: np.ndarray | list[np.ndarray],
     params: InputParams,
 ) -> Bins:
     """
@@ -235,10 +237,11 @@ def t_evol_nmar_seemps(
 
     times = np.arange(n_steps + 1) * delta_t
 
-    # Input field generator: first i_n0 then vacuum bins
+    # Input field generator: first the supplied initial waveguide bins,
+    # then vacuum bins afterwards
     input_field = states.input_state_generator(
         params.d_t_total,
-        input_bins=[np.asarray(i_n0, dtype=complex)],
+        input_bins=i_n0,
     )
 
     # ------------------------------------------------------------
