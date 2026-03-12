@@ -68,6 +68,7 @@ class InputParams:
         Example:
             [2]          for one TLS
             [2, 2]       for two TLSs
+            [2, d_c]     for one TLS coupled to one cavity
         The total system dimension is their product.
 
     d_t_total : ndarray
@@ -86,6 +87,10 @@ class InputParams:
     gamma_l2, gamma_r2 : float
         Additional left/right couplings, used in geometries with multiple
         coupling points (for example giant-atom / feedback-type setups).
+
+    g : float
+        Internal atom-cavity coupling strength, used by cavity-QED system
+        Hamiltonians such as `hamiltonian_1tls_cavity_nmar`.
 
     tau : float
         Delay time.
@@ -108,6 +113,7 @@ class InputParams:
     gamma_r: float
     gamma_l2: float = 0.0
     gamma_r2: float = 0.0
+    g: float = 0.0
     tau: float = 0.0
     phase: float = 0.0
     atol: float = 1e-12
@@ -133,6 +139,7 @@ class InputParams:
         self.gamma_r = float(self.gamma_r)
         self.gamma_l2 = float(self.gamma_l2)
         self.gamma_r2 = float(self.gamma_r2)
+        self.g = float(self.g)
 
         self.tau = float(self.tau)
         self.phase = float(self.phase)
