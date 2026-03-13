@@ -2,15 +2,30 @@
 # -*- coding: utf-8 -*-
 
 """
-Time-evolution routines for waveguide-QED simulations.
+Time-evolution drivers for the waveguide-QED MPS simulations.
 
-The file provides Markovian and delayed-feedback evolutions in two styles:
+This module exposes four public routines:
 
-- a SeeMPS-oriented implementation based on ``CanonicalMPS``
-- an explicit local-tensor implementation based on pair/split operations
+- ``t_evol_mar_seemps``: Markovian evolution written in a SeeMPS style
+- ``t_evol_mar``: Markovian evolution with explicit pair/split tensors
+- ``t_evol_nmar_seemps``: delayed-feedback evolution in a SeeMPS style
+- ``t_evol_nmar``: delayed-feedback evolution with explicit pair/split tensors
 
-Both styles return the same ``Bins`` container, so the observable layer can be
-shared across the codebase.
+All four functions share the same high-level interface:
+
+- ``ham`` provides either a fixed local Hamiltonian or a callable ``ham(step)``
+- ``i_s0`` is the initial system tensor
+- ``i_n0`` is either one initial field bin or a full list of input bins
+- ``params`` stores the simulation dimensions, time step, delay, and truncation
+  settings
+
+Every routine returns a ``Bins`` object. The exact fields depend on the
+physical setting:
+
+- Markovian evolutions store system, input, and emitted-output snapshots
+- delayed-feedback evolutions additionally store the loop-field snapshots and
+  two Schmidt histories: one across the active system/loop cut and one across
+  the delay-line cut used while swapping the feedback bin back
 """
 
 import numpy as np
@@ -36,7 +51,14 @@ __all__ = ["t_evol_mar_seemps", "t_evol_mar", "t_evol_nmar_seemps", "t_evol_nmar
 
 
 def _observable_copy(tensor: np.ndarray) -> np.ndarray:
-    """Copy a local tensor and remove any scalar norm prefactor."""
+    """
+    Copy a one-site tensor for later observables.
+
+    Some locally centered tensors carry an overall scalar prefactor even though
+    their physical reduced state is already fixed. For stored snapshots we
+    remove that scalar so single-time observables behave like normalized local
+    states.
+    """
     snapshot = tensor.copy()
     norm = float(np.linalg.norm(snapshot))
     if norm > 0.0 and not np.isclose(norm, 1.0):
@@ -51,11 +73,26 @@ def t_evol_mar_seemps(
     params: InputParams,
 ) -> Bins:
     """
-    Markovian evolution in a SeeMPS style.
+    Evolve a Markovian system using ``CanonicalMPS`` updates.
 
-    Only the active pair ``[system | current_bin]`` is propagated. After each
-    local interaction the emitted bin is swapped away and stored, while the
-    updated system tensor is reused at the next step.
+    Main logic
+    ----------
+    Only the active pair ``[system | input_bin]`` is evolved at each time step.
+    The local gate is applied, the emitted bin is swapped away, and the updated
+    system tensor is kept as the starting point for the next step.
+
+    Inputs
+    ------
+    ``ham`` is the local system-bin Hamiltonian or a callable returning it at
+    each step. ``i_s0`` is the initial system tensor. ``i_n0`` supplies the
+    incoming field bins. ``params`` provides the dimensions, time step, and MPS
+    truncation strategy.
+
+    Returns
+    -------
+    ``Bins`` containing time-ordered snapshots of the system, input field,
+    emitted output field, and the correlation tensors used by the two-time
+    observable routines.
     """
 
     delta_t = params.delta_t
@@ -67,7 +104,7 @@ def t_evol_mar_seemps(
     strategy = strategy_from_params(params)
     times = np.arange(n_steps + 1) * delta_t
 
-    # Yield the supplied input bins first and vacuum bins afterwards.
+    # Setup: dimensions, time grid, truncation strategy, and input generator.
     input_field = states.input_state_generator(
         params.d_t_total,
         input_bins=i_n0,
@@ -76,7 +113,7 @@ def t_evol_mar_seemps(
     psi_sys = np.asarray(i_s0, dtype=complex)
     system_states = [psi_sys.copy()]
 
-    # t = 0 snapshots before the first interaction.
+    # Step 0. Store the snapshots at t = 0 before any system-field interaction.
     initial_bin = states.wg_ground(d_bin)
     output_field_states = [initial_bin.copy()]
     input_field_states = [initial_bin.copy()]
@@ -90,8 +127,8 @@ def t_evol_mar_seemps(
         U_int = u_evol(H, d_sys, d_bin)
         input_bin = np.asarray(next(input_field), dtype=complex)
 
-        # 1. Build the active pair [system | input] with the center on the
-        # input bin so its local tensor can be stored directly.
+        # Step 1. Build the active pair [system | input] and center it on the
+        # fresh input bin so its one-site tensor can be stored directly.
         psi = CanonicalMPS(
             [psi_sys, input_bin],
             center=1,
@@ -100,14 +137,16 @@ def t_evol_mar_seemps(
         )
         input_field_states.append(psi[1])
 
-        # 2. Apply the local gate on [system | input].
+        # Step 2. Apply the local gate on the active pair. After the update the
+        # right tensor is the interacting field bin, which becomes output.
         theta = pair_tensor(psi[0], psi[1])
         theta = contract_cached("pqij,aijb->apqb", U_int, theta)
         psi.update_2site_right(theta, site=0, strategy=strategy)
         output_field_states.append(psi[1])
 
-        # 3. Swap to [output_bin | updated_system], record correlation/Schmidt
-        # data, and keep the center on the system for the next step.
+        # Step 3. Swap to [output | updated_system]. This restores the gauge
+        # where the system tensor is the object propagated to the next step,
+        # while the left tensor is kept for correlation functions.
         theta = swap_pair_tensor(psi[0], psi[1])
         psi.update_2site_right(theta, site=0, strategy=strategy)
         correlation_bins.append(psi[0])
@@ -115,7 +154,8 @@ def t_evol_mar_seemps(
         psi_sys = psi[1]
         system_states.append(psi[1])
 
-    # Replace the last correlation entry by the final emitted-bin tensor.
+    # Finalize: replace the last correlation entry by the last emitted-bin
+    # tensor so the trailing edge of the output chain is stored consistently.
     if n_steps > 0:
         psi.recenter(0)
         correlation_bins[-1] = psi[0]
@@ -137,10 +177,23 @@ def t_evol_mar(
     params: InputParams,
 ) -> Bins:
     """
-    Markovian evolution with explicit pair/split operations.
+    Evolve a Markovian system with explicit pair/split tensor updates.
 
-    This follows the same active-pair logic as ``t_evol_mar_seemps`` but keeps
-    the intermediate two-site tensors visible.
+    Main logic
+    ----------
+    This follows the same physics as ``t_evol_mar_seemps`` but keeps every
+    temporary two-site tensor explicit: form the active pair, split to store the
+    input bin, apply the gate, split again to obtain the emitted bin, then swap
+    into the gauge used for the next step.
+
+    Inputs
+    ------
+    The inputs match ``t_evol_mar_seemps``.
+
+    Returns
+    -------
+    ``Bins`` with the same Markovian outputs as the SeeMPS version, plus the
+    bond-dimension history extracted from the explicit local tensors.
     """
 
     delta_t = params.delta_t
@@ -152,7 +205,7 @@ def t_evol_mar(
     strategy = strategy_from_params(params)
     times = np.arange(n_steps + 1) * delta_t
 
-    # Yield the supplied input bins first and vacuum bins afterwards.
+    # Setup: dimensions, time grid, truncation strategy, and input generator.
     input_field = states.input_state_generator(
         params.d_t_total,
         input_bins=i_n0,
@@ -161,7 +214,7 @@ def t_evol_mar(
     psi_sys = np.asarray(i_s0, dtype=complex)
     system_states = [psi_sys.copy()]
 
-    # t = 0 snapshots before the first interaction.
+    # Step 0. Store the snapshots at t = 0 before any system-field interaction.
     initial_bin = states.wg_ground(d_bin)
     output_field_states = [initial_bin.copy()]
     input_field_states = [initial_bin.copy()]
@@ -175,34 +228,38 @@ def t_evol_mar(
         U_int = u_evol(H, d_sys, d_bin)
         input_bin = np.asarray(next(input_field), dtype=complex)
 
-        # 1. Put the center on the input bin before storing it.
+        # Step 1. Form [system | input] and split it with the center on the
+        # input bin so the incoming one-site tensor can be stored directly.
         theta_in = pair_tensor(psi_sys, input_bin)
         theta = theta_in.copy()
         _, i_nk = split_pair_right(theta_in, strategy)
         input_field_states.append(_observable_copy(i_nk))
 
-        # 2. Apply the local gate on [system | input].
+        # Step 2. Apply the local gate and split again so the interacting field
+        # bin is stored as the emitted output.
         theta = contract_cached("pqij,aijb->apqb", U_int, theta)
         i_s, output_bin = split_pair_right(theta, strategy)
         output_field_states.append(_observable_copy(output_bin))
 
-        # 3. Swap to [output_bin | updated_system].
+        # Step 3. Swap to [output | updated_system] so the updated system tensor
+        # is in the gauge used to continue the evolution.
         theta = swap_pair_tensor(i_s, output_bin)
         correlation_tensor, system_tensor = split_pair_right(theta, strategy)
 
-        # 4. Record Schmidt data across the active cut.
+        # Step 4. Record Schmidt and bond-dimension data across the active cut.
         w = _schmidt_weights(system_tensor)
         s = np.sqrt(np.maximum(w, 0.0))
         schmidt.append(s[: params.bond_max])
         bond_dims.append(int(correlation_tensor.shape[2]))
 
-        # 5. Store the updated system tensor and the correlation tensor used by
+        # Step 5. Store the propagated system tensor and the left tensor used by
         # later two-time observables.
         system_states.append(_observable_copy(system_tensor))
         correlation_bins.append(correlation_tensor)
         psi_sys = system_tensor
 
-    # Replace the last correlation entry by the final emitted-bin tensor.
+    # Finalize: replace the last correlation entry by the last emitted-bin
+    # tensor so the trailing edge of the output chain is stored consistently.
     if n_steps > 0:
         correlation_tensor, _ = split_pair_left(theta, strategy)
         correlation_bins[-1] = correlation_tensor
@@ -225,19 +282,38 @@ def t_evol_nmar_seemps(
     params: InputParams,
 ) -> Bins:
     """
-    Delayed-feedback evolution in a SeeMPS style.
+    Evolve a delayed-feedback system using ``CanonicalMPS`` updates.
 
-    The active local block is ``[feedback | system | input]``. The delayed
-    feedback bin is first moved next to the system, evolved together with the
-    fresh input bin, written back into the delay line, and finally swapped back
-    so the delay-line ordering is restored.
+    Main logic
+    ----------
+    The active local block is ``[feedback | system | input]``. At every step
+    the delayed feedback bin is swapped next to the system, evolved together
+    with the fresh input bin, split back into ``feedback/system/loop`` pieces,
+    written into the delay line, and then swapped back so the delay-line order
+    matches the next time step.
+
+    Inputs
+    ------
+    ``ham`` is now a three-body local Hamiltonian acting on
+    ``[feedback | system | input]``. The other inputs follow the Markovian
+    interface, except that ``params`` must encode a genuine delay with
+    ``tau > delta_t``.
+
+    Returns
+    -------
+    ``Bins`` containing system snapshots, loop-field snapshots, emitted output
+    snapshots, input snapshots, correlation tensors, and two Schmidt histories:
+    one for the active feedback-loop cut and one for the swap-back cut inside
+    the delay line.
     """
 
     delta_t = params.delta_t
     n_steps = params.steps
     delay_steps = params.delay_steps
 
-    # These routines assume a genuine delay line between system and feedback.
+    # Setup: dimensions, time grid, truncation strategy, and input generator.
+    # A genuine delay line is required; tau = delta_t belongs to the Markovian
+    # limit and is not handled by this routine.
     if delay_steps <= 1:
         raise ValueError("tau must satisfy tau > delta_t")
 
@@ -246,7 +322,6 @@ def t_evol_nmar_seemps(
     strategy = strategy_from_params(params)
     times = np.arange(n_steps + 1) * delta_t
 
-    # Yield the supplied input bins first and vacuum bins afterwards.
     input_field = states.input_state_generator(
         params.d_t_total,
         input_bins=i_n0,
@@ -255,7 +330,8 @@ def t_evol_nmar_seemps(
     psi_sys = np.asarray(i_s0, dtype=complex)
     vacuum = states.wg_ground(d_bin)
 
-    # t = 0 snapshots before the first interaction.
+    # Step 0. Store the snapshots at t = 0 and initialize the vacuum delay
+    # line that will carry the feedback field.
     system_states = [psi_sys.copy()]
     loop_field_states = [vacuum.copy()]
     output_field_states = [vacuum.copy()]
@@ -275,14 +351,16 @@ def t_evol_nmar_seemps(
         H = ham(step) if callable(ham) else ham
         U_int = u_evol(H, d_sys, d_bin, 2)
 
-        # 1. Move the delayed feedback bin next to the system.
+        # Step 1. Move the feedback bin that is due to re-interact next to the
+        # system by swapping it through the delay line.
         feedback_bin = delay_line[step]
         for j in range(step, step + delay_steps - 1):
             theta = swap_pair_tensor(feedback_bin, delay_line[j + 1])
             delay_line[j], feedback_bin = split_pair_right(theta, strategy)
 
-        # 2. Build the local block [feedback | system | input] with the center
-        # on the fresh input bin so its local tensor can be stored directly.
+        # Step 2. Build the active block [feedback | system | input] and center
+        # it on the fresh input bin so the incoming one-site tensor can be
+        # stored directly.
         input_bin = np.asarray(next(input_field), dtype=complex)
         psi = CanonicalMPS(
             [feedback_bin, system_tensor, input_bin],
@@ -292,7 +370,7 @@ def t_evol_nmar_seemps(
         )
         input_field_states.append(_observable_copy(np.asarray(psi[2], copy=True)))
 
-        # 3. Apply the local three-body gate.
+        # Step 3. Apply the three-body local gate on the active block.
         theta = contract_cached(
             "aic,cjd,dkb,pqrijk->apqrb",
             psi[0],
@@ -301,20 +379,22 @@ def t_evol_nmar_seemps(
             U_int,
         )
 
-        # 4. First cut: [feedback] | [system, loop].
+        # Step 4. First cut: separate the updated feedback branch from the
+        # remaining [system | loop] block.
         theta = theta.reshape(theta.shape[0], d_bin, d_sys * d_bin, theta.shape[-1])
         feedback_left, rest_oc = split_pair_right(theta, strategy)
 
-        # 5. Second cut: [system] | [loop], then swap to [loop | system] so the
-        # system tensor is in the gauge used at the next step.
+        # Step 5. Second cut: separate [system | loop], then swap to
+        # [loop | system] so the system tensor is in the gauge used at the next
+        # time step.
         theta = rest_oc.reshape(rest_oc.shape[0], d_sys, d_bin, rest_oc.shape[-1])
         system_tensor_centered, loop_bin = split_pair_left(theta, strategy)
         system_states.append(_observable_copy(system_tensor_centered))
         theta = swap_pair_tensor(system_tensor_centered, loop_bin)
         loop_bin_centered, system_tensor = split_pair_left(theta, strategy)
 
-        # 6. Reattach the loop bin to the feedback branch before storing local
-        # snapshots.
+        # Step 6. Reattach the loop bin to the feedback branch. This is the cut
+        # whose Schmidt data represents the active system-loop entanglement.
         feedback_loop = CanonicalMPS(
             [feedback_left, loop_bin_centered],
             center=1,
@@ -331,8 +411,8 @@ def t_evol_nmar_seemps(
         )
         bond_dims.append(int(feedback_left_mid.shape[2]))
 
-        # 7. Recenter so the emitted feedback bin is the local center, then
-        # write the updated feedback branch back into the delay line.
+        # Step 7. Recenter onto the emitted feedback bin, store the output
+        # snapshot, and write the updated branch back into the delay line.
         feedback_loop.recenter(0)
         feedback_bin_centered = np.asarray(feedback_loop[0], copy=True)
         loop_internal = np.asarray(feedback_loop[1], copy=True)
@@ -340,7 +420,8 @@ def t_evol_nmar_seemps(
         delay_line[step + delay_steps - 1] = feedback_bin_centered
         delay_line.append(loop_internal)
 
-        # 8. Swap the updated feedback bin back through the delay line.
+        # Step 8. Swap the emitted feedback bin back through the delay line so
+        # the delay-line ordering is restored for the next step.
         current_feedback = feedback_bin_centered
         for j in range(step + delay_steps - 1, step, -1):
             # Keep the final swapped pair so the delay-bin-side tensor can be
@@ -365,7 +446,8 @@ def t_evol_nmar_seemps(
         correlation_bins.append(correlation_tensor)
         last_feedback_center = _observable_copy(current_feedback)
 
-    # Replace the last correlation entry by the final emitted-bin tensor.
+    # Finalize: replace the last correlation entry by the final emitted-bin
+    # tensor so the end of the feedback-output chain is stored consistently.
     if n_steps > 0 and last_feedback_center is not None:
         correlation_bins[-1] = last_feedback_center
 
@@ -390,18 +472,33 @@ def t_evol_nmar(
     params: InputParams,
 ) -> Bins:
     """
-    Delayed-feedback evolution with explicit pair/split operations.
+    Evolve a delayed-feedback system with explicit pair/split tensor updates.
 
-    This follows the same physics as ``t_evol_nmar_seemps`` but keeps the local
-    tensor manipulations explicit instead of wrapping the active blocks in
-    ``CanonicalMPS`` objects.
+    Main logic
+    ----------
+    This follows the same delayed-feedback physics as
+    ``t_evol_nmar_seemps``, but all local manipulations are kept explicit:
+    move the feedback bin, split around the incoming bin, apply the three-body
+    gate, split back into ``feedback/system/loop`` tensors, write the updated
+    branch into the delay line, and finally swap the emitted feedback bin back.
+
+    Inputs
+    ------
+    The inputs match ``t_evol_nmar_seemps``.
+
+    Returns
+    -------
+    ``Bins`` with the same delayed-feedback outputs as the SeeMPS version,
+    including both Schmidt histories and both bond-dimension histories.
     """
 
     delta_t = params.delta_t
     n_steps = params.steps
     delay_steps = params.delay_steps
 
-    # These routines assume a genuine delay line between system and feedback.
+    # Setup: dimensions, time grid, truncation strategy, and input generator.
+    # A genuine delay line is required; tau = delta_t belongs to the Markovian
+    # limit and is not handled by this routine.
     if delay_steps <= 1:
         raise ValueError("tau must satisfy tau > delta_t")
 
@@ -410,7 +507,6 @@ def t_evol_nmar(
     strategy = strategy_from_params(params)
     times = np.arange(n_steps + 1) * delta_t
 
-    # Yield the supplied input bins first and vacuum bins afterwards.
     input_field = states.input_state_generator(
         params.d_t_total,
         input_bins=i_n0,
@@ -419,7 +515,8 @@ def t_evol_nmar(
     psi_sys = np.asarray(i_s0, dtype=complex)
     vacuum = states.wg_ground(d_bin)
 
-    # t = 0 snapshots before the first interaction.
+    # Step 0. Store the snapshots at t = 0 and initialize the vacuum delay
+    # line that will carry the feedback field.
     system_states = [psi_sys.copy()]
     loop_field_states = [vacuum.copy()]
     output_field_states = [vacuum.copy()]
@@ -439,14 +536,15 @@ def t_evol_nmar(
         H = ham(step) if callable(ham) else ham
         U_int = u_evol(H, d_sys, d_bin, 2)
 
-        # 1. Move the delayed feedback bin next to the system.
+        # Step 1. Move the feedback bin that is due to re-interact next to the
+        # system by swapping it through the delay line.
         feedback_bin = delay_line[step]
         for j in range(step, step + delay_steps - 1):
             theta = swap_pair_tensor(feedback_bin, delay_line[j + 1])
             delay_line[j], feedback_bin = split_pair_right(theta, strategy)
 
-        # 2. Split [feedback | system], then [system | input], so the new input
-        # bin can be stored with the center on its own site.
+        # Step 2. Split [feedback | system], then [system | input], so the
+        # fresh input bin can be stored with the center on its own site.
         theta = pair_tensor(feedback_bin, system_tensor)
         feedback_left, system_tensor = split_pair_right(theta, strategy)
         input_bin = np.asarray(next(input_field), dtype=complex)
@@ -454,7 +552,7 @@ def t_evol_nmar(
         system_left, input_bin_oc = split_pair_right(theta, strategy)
         input_field_states.append(_observable_copy(input_bin_oc))
 
-        # 3. Apply the local three-body gate.
+        # Step 3. Apply the three-body local gate on the active block.
         theta = contract_cached(
             "aic,cjd,dkb,pqrijk->apqrb",
             feedback_left,
@@ -463,22 +561,24 @@ def t_evol_nmar(
             U_int,
         )
 
-        # 4. First cut: [feedback] | [system, loop].
+        # Step 4. First cut: separate the updated feedback branch from the
+        # remaining [system | loop] block.
         theta = theta.reshape(theta.shape[0], d_bin, d_sys * d_bin, theta.shape[-1])
         feedback_left_new, rest_oc = split_pair_right(theta, strategy)
 
-        # 5. Second cut: [system] | [loop].
+        # Step 5. Second cut: separate [system | loop].
         theta = rest_oc.reshape(rest_oc.shape[0], d_sys, d_bin, rest_oc.shape[-1])
         system_tensor_centered, loop_bin = split_pair_left(theta, strategy)
         system_states.append(_observable_copy(system_tensor_centered))
 
-        # 6. Swap to [loop | system] so the system tensor is ready for the next
-        # time step.
+        # Step 6. Swap to [loop | system] so the system tensor is ready for the
+        # next time step.
         theta = swap_pair_tensor(system_tensor_centered, loop_bin)
         loop_bin_centered, system_tensor = split_pair_left(theta, strategy)
 
-        # 7. Reattach the loop bin to the feedback branch, store local
-        # snapshots, and write the updated branch back into the delay line.
+        # Step 7. Reattach the loop bin to the feedback branch, store the
+        # active-cut observables, and write the updated branch back into the
+        # delay line.
         theta = pair_tensor(feedback_left_new, loop_bin_centered)
         theta_centered_on_feedback = theta.copy()
         feedback_left_mid, loop_bin_oc = split_pair_right(theta, strategy)
@@ -496,7 +596,8 @@ def t_evol_nmar(
         delay_line[step + delay_steps - 1] = feedback_bin_centered
         delay_line.append(loop_internal)
 
-        # 8. Swap the updated feedback bin back through the delay line.
+        # Step 8. Swap the emitted feedback bin back through the delay line so
+        # the delay-line ordering is restored for the next step.
         current_feedback = feedback_bin_centered
         for j in range(step + delay_steps - 1, step, -1):
             # Keep the final swapped pair so the delay-bin-side tensor can be
@@ -520,7 +621,8 @@ def t_evol_nmar(
 
         system_tensor = np.asarray(system_tensor, copy=True)
 
-    # Replace the last correlation entry by the final emitted-bin tensor.
+    # Finalize: replace the last correlation entry by the final emitted-bin
+    # tensor so the end of the feedback-output chain is stored consistently.
     if n_steps > 0 and last_feedback_center is not None:
         correlation_bins[-1] = last_feedback_center
 
