@@ -5,7 +5,7 @@ from functools import lru_cache
 import opt_einsum as oe
 import numpy as np
 
-from seemps.cython import _select_svd_driver
+from seemps.cython import _destructive_svd, _select_svd_driver, destructively_truncate_vector
 from seemps.state import DEFAULT_STRATEGY
 from seemps.state.schmidt import _left_orth_2site, _right_orth_2site
 
@@ -19,6 +19,7 @@ __all__ = [
     "local_density_matrix",
     "split_pair_left",
     "split_pair_right",
+    "split_pair_both",
     "strategy_from_params",
 ]
 
@@ -103,6 +104,38 @@ def split_pair_right(
     """
     left, right, _ = _left_orth_2site(theta, strategy)
     return left, right
+
+
+def split_pair_both(
+    theta: np.ndarray,
+    strategy,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Split one two-site tensor once and return both canonical gauges.
+
+    Returns
+    -------
+    left_centered, right_isometric, left_isometric, right_centered, singular_values
+
+    where:
+    - ``(left_centered, right_isometric)`` matches ``split_pair_left(theta, strategy)``
+    - ``(left_isometric, right_centered)`` matches ``split_pair_right(theta, strategy)``
+    - ``singular_values`` are the truncated Schmidt singular values used by both
+      decompositions
+    """
+    a, d1, d2, b = theta.shape
+    U, s, Vh = _destructive_svd(theta.reshape(a * d1, d2 * b))
+    destructively_truncate_vector(s, strategy)
+    D = int(s.shape[0])
+
+    U = U[:, :D]
+    Vh = Vh[:D, :]
+
+    left_isometric = U.reshape(a, d1, D)
+    right_isometric = Vh.reshape(D, d2, b)
+    left_centered = (U * s).reshape(a, d1, D)
+    right_centered = (s[:, None] * Vh).reshape(D, d2, b)
+    return left_centered, right_isometric, left_isometric, right_centered, s
 
 
 def strategy_from_params(params: InputParams):

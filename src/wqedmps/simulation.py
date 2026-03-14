@@ -28,9 +28,9 @@ physical setting:
   the delay-line cut used while swapping the feedback bin back
 """
 
+import math
 import numpy as np
 
-from seemps.state.schmidt import _schmidt_weights
 from seemps.state import CanonicalMPS
 
 from wqedmps import states as states
@@ -38,6 +38,7 @@ from wqedmps.hamiltonians import Hamiltonian
 from wqedmps.mps_tools import (
     contract_cached,
     pair_tensor,
+    split_pair_both,
     split_pair_left,
     split_pair_right,
     strategy_from_params,
@@ -60,9 +61,13 @@ def _observable_copy(tensor: np.ndarray) -> np.ndarray:
     states.
     """
     snapshot = tensor.copy()
-    norm = float(np.linalg.norm(snapshot))
-    if norm > 0.0 and not np.isclose(norm, 1.0):
-        snapshot /= norm
+    norm_sq = float(np.vdot(snapshot, snapshot).real)
+    if norm_sq > 0.0:
+        norm = math.sqrt(norm_sq)
+        # Match the default scalar tolerance of np.isclose(norm, 1.0) without
+        # the overhead of the full array-oriented helper.
+        if abs(norm - 1.0) > 1.0e-5 + 1.0e-8:
+            snapshot /= norm
     return snapshot
 
 
@@ -103,6 +108,8 @@ def t_evol_mar_seemps(
 
     strategy = strategy_from_params(params)
     times = np.arange(n_steps + 1) * delta_t
+    ham_is_callable = callable(ham)
+    static_gate = None if ham_is_callable else u_evol(ham, d_sys, d_bin)
 
     # Setup: dimensions, time grid, truncation strategy, and input generator.
     input_field = states.input_state_generator(
@@ -121,10 +128,10 @@ def t_evol_mar_seemps(
 
     schmidt = [np.array([1.0])]
     bond_dims = [1]
+    last_correlation_centered = None
 
     for step in range(n_steps):
-        H = ham(step) if callable(ham) else ham
-        U_int = u_evol(H, d_sys, d_bin)
+        U_int = u_evol(ham(step), d_sys, d_bin) if ham_is_callable else static_gate
         input_bin = np.asarray(next(input_field), dtype=complex)
 
         # Step 1. Build the active pair [system | input] and center it on the
@@ -204,6 +211,8 @@ def t_evol_mar(
 
     strategy = strategy_from_params(params)
     times = np.arange(n_steps + 1) * delta_t
+    ham_is_callable = callable(ham)
+    static_gate = None if ham_is_callable else u_evol(ham, d_sys, d_bin)
 
     # Setup: dimensions, time grid, truncation strategy, and input generator.
     input_field = states.input_state_generator(
@@ -224,8 +233,7 @@ def t_evol_mar(
     bond_dims = [1]
 
     for step in range(n_steps):
-        H = ham(step) if callable(ham) else ham
-        U_int = u_evol(H, d_sys, d_bin)
+        U_int = u_evol(ham(step), d_sys, d_bin) if ham_is_callable else static_gate
         input_bin = np.asarray(next(input_field), dtype=complex)
 
         # Step 1. Form [system | input] and split it with the center on the
@@ -243,13 +251,16 @@ def t_evol_mar(
 
         # Step 3. Swap to [output | updated_system] so the updated system tensor
         # is in the gauge used to continue the evolution.
-        theta = swap_pair_tensor(i_s, output_bin)
-        correlation_tensor, system_tensor = split_pair_right(theta, strategy)
+        (
+            last_correlation_centered,
+            _,
+            correlation_tensor,
+            system_tensor,
+            schmidt_vals,
+        ) = split_pair_both(swap_pair_tensor(i_s, output_bin), strategy)
 
         # Step 4. Record Schmidt and bond-dimension data across the active cut.
-        w = _schmidt_weights(system_tensor)
-        s = np.sqrt(np.maximum(w, 0.0))
-        schmidt.append(s[: params.bond_max])
+        schmidt.append((schmidt_vals / np.linalg.norm(schmidt_vals))[: params.bond_max])
         bond_dims.append(int(correlation_tensor.shape[2]))
 
         # Step 5. Store the propagated system tensor and the left tensor used by
@@ -260,9 +271,8 @@ def t_evol_mar(
 
     # Finalize: replace the last correlation entry by the last emitted-bin
     # tensor so the trailing edge of the output chain is stored consistently.
-    if n_steps > 0:
-        correlation_tensor, _ = split_pair_left(theta, strategy)
-        correlation_bins[-1] = correlation_tensor
+    if n_steps > 0 and last_correlation_centered is not None:
+        correlation_bins[-1] = last_correlation_centered
 
     return Bins(
         system_states=system_states,
@@ -321,6 +331,8 @@ def t_evol_nmar_seemps(
     d_bin = params.d_t
     strategy = strategy_from_params(params)
     times = np.arange(n_steps + 1) * delta_t
+    ham_is_callable = callable(ham)
+    static_gate = None if ham_is_callable else u_evol(ham, d_sys, d_bin, 2)
 
     input_field = states.input_state_generator(
         params.d_t_total,
@@ -348,8 +360,9 @@ def t_evol_nmar_seemps(
     last_feedback_center = None
 
     for step in range(n_steps):
-        H = ham(step) if callable(ham) else ham
-        U_int = u_evol(H, d_sys, d_bin, 2)
+        U_int = (
+            u_evol(ham(step), d_sys, d_bin, 2) if ham_is_callable else static_gate
+        )
 
         # Step 1. Move the feedback bin that is due to re-interact next to the
         # system by swapping it through the delay line.
@@ -368,7 +381,7 @@ def t_evol_nmar_seemps(
             normalize=False,
             strategy=strategy,
         )
-        input_field_states.append(_observable_copy(np.asarray(psi[2], copy=True)))
+        input_field_states.append(_observable_copy(psi[2]))
 
         # Step 3. Apply the three-body local gate on the active block.
         theta = contract_cached(
@@ -395,27 +408,22 @@ def t_evol_nmar_seemps(
 
         # Step 6. Reattach the loop bin to the feedback branch. This is the cut
         # whose Schmidt data represents the active system-loop entanglement.
-        feedback_loop = CanonicalMPS(
-            [feedback_left, loop_bin_centered],
-            center=1,
-            normalize=False,
-            strategy=strategy,
-        )
-        feedback_left_mid = np.asarray(feedback_loop[0], copy=True)
-        loop_bin_oc = np.asarray(feedback_loop[1], copy=True)
+        theta = pair_tensor(feedback_left, loop_bin_centered)
+        (
+            feedback_bin_centered,
+            loop_internal,
+            feedback_left_mid,
+            loop_bin_oc,
+            schmidt_vals,
+        ) = split_pair_both(theta, strategy)
         loop_field_states.append(_observable_copy(loop_bin_oc))
 
         # Record Schmidt data across the active feedback|loop cut.
-        schmidt.append(
-            np.sqrt(np.maximum(feedback_loop.Schmidt_weights(), 0.0))[: params.bond_max]
-        )
+        schmidt.append((schmidt_vals / np.linalg.norm(schmidt_vals))[: params.bond_max])
         bond_dims.append(int(feedback_left_mid.shape[2]))
 
-        # Step 7. Recenter onto the emitted feedback bin, store the output
-        # snapshot, and write the updated branch back into the delay line.
-        feedback_loop.recenter(0)
-        feedback_bin_centered = np.asarray(feedback_loop[0], copy=True)
-        loop_internal = np.asarray(feedback_loop[1], copy=True)
+        # Step 7. Store the emitted feedback snapshot and write the updated
+        # branch back into the delay line.
         output_field_states.append(_observable_copy(feedback_bin_centered))
         delay_line[step + delay_steps - 1] = feedback_bin_centered
         delay_line.append(loop_internal)
@@ -423,25 +431,30 @@ def t_evol_nmar_seemps(
         # Step 8. Swap the emitted feedback bin back through the delay line so
         # the delay-line ordering is restored for the next step.
         current_feedback = feedback_bin_centered
+        correlation_tensor = None
+        delayed_bin = None
+        tau_singular_values = None
         for j in range(step + delay_steps - 1, step, -1):
-            # Keep the final swapped pair so the delay-bin-side tensor can be
-            # stored in ``correlation_bins``.
-            theta = swap_pair_tensor(delay_line[j - 1], current_feedback)
-            theta_centered_on_delay = theta
-            current_feedback, delay_line[j] = split_pair_left(theta, strategy)
+            if j == step + 1:
+                theta = swap_pair_tensor(delay_line[j - 1], current_feedback)
+                (
+                    current_feedback,
+                    delay_line[j],
+                    correlation_tensor,
+                    delayed_bin,
+                    tau_singular_values,
+                ) = split_pair_both(theta, strategy)
+            else:
+                theta = swap_pair_tensor(delay_line[j - 1], current_feedback)
+                current_feedback, delay_line[j] = split_pair_left(theta, strategy)
 
         # Record Schmidt data across the cut used while swapping the feedback
         # bin back through the delay line.
         schmidt_tau.append(
-            np.sqrt(np.maximum(_schmidt_weights(current_feedback), 0.0))[
-                : params.bond_max
-            ]
+            (tau_singular_values / np.linalg.norm(tau_singular_values))[: params.bond_max]
         )
         bond_dims_tau.append(int(current_feedback.shape[2]))
 
-        correlation_tensor, delayed_bin = split_pair_right(
-            theta_centered_on_delay, strategy
-        )
         delay_line[step + 1] = delayed_bin
         correlation_bins.append(correlation_tensor)
         last_feedback_center = _observable_copy(current_feedback)
@@ -506,6 +519,8 @@ def t_evol_nmar(
     d_bin = params.d_t
     strategy = strategy_from_params(params)
     times = np.arange(n_steps + 1) * delta_t
+    ham_is_callable = callable(ham)
+    static_gate = None if ham_is_callable else u_evol(ham, d_sys, d_bin, 2)
 
     input_field = states.input_state_generator(
         params.d_t_total,
@@ -533,8 +548,9 @@ def t_evol_nmar(
     last_feedback_center = None
 
     for step in range(n_steps):
-        H = ham(step) if callable(ham) else ham
-        U_int = u_evol(H, d_sys, d_bin, 2)
+        U_int = (
+            u_evol(ham(step), d_sys, d_bin, 2) if ham_is_callable else static_gate
+        )
 
         # Step 1. Move the feedback bin that is due to re-interact next to the
         # system by swapping it through the delay line.
@@ -580,18 +596,19 @@ def t_evol_nmar(
         # active-cut observables, and write the updated branch back into the
         # delay line.
         theta = pair_tensor(feedback_left_new, loop_bin_centered)
-        theta_centered_on_feedback = theta.copy()
-        feedback_left_mid, loop_bin_oc = split_pair_right(theta, strategy)
+        (
+            feedback_bin_centered,
+            loop_internal,
+            feedback_left_mid,
+            loop_bin_oc,
+            schmidt_vals,
+        ) = split_pair_both(theta, strategy)
         loop_field_states.append(_observable_copy(loop_bin_oc))
 
         # Record Schmidt data across the active feedback|loop cut.
-        w_fb = _schmidt_weights(loop_bin_oc)
-        schmidt.append(np.sqrt(np.maximum(w_fb, 0.0))[: params.bond_max])
+        schmidt.append((schmidt_vals / np.linalg.norm(schmidt_vals))[: params.bond_max])
         bond_dims.append(int(feedback_left_mid.shape[2]))
 
-        feedback_bin_centered, loop_internal = split_pair_left(
-            theta_centered_on_feedback, strategy
-        )
         output_field_states.append(_observable_copy(feedback_bin_centered))
         delay_line[step + delay_steps - 1] = feedback_bin_centered
         delay_line.append(loop_internal)
@@ -599,22 +616,30 @@ def t_evol_nmar(
         # Step 8. Swap the emitted feedback bin back through the delay line so
         # the delay-line ordering is restored for the next step.
         current_feedback = feedback_bin_centered
+        correlation_tensor = None
+        delayed_bin = None
+        tau_singular_values = None
         for j in range(step + delay_steps - 1, step, -1):
-            # Keep the final swapped pair so the delay-bin-side tensor can be
-            # stored in ``correlation_bins``.
-            theta = swap_pair_tensor(delay_line[j - 1], current_feedback)
-            theta_centered_on_delay = theta.copy()
-            current_feedback, delay_line[j] = split_pair_left(theta, strategy)
+            if j == step + 1:
+                theta = swap_pair_tensor(delay_line[j - 1], current_feedback)
+                (
+                    current_feedback,
+                    delay_line[j],
+                    correlation_tensor,
+                    delayed_bin,
+                    tau_singular_values,
+                ) = split_pair_both(theta, strategy)
+            else:
+                theta = swap_pair_tensor(delay_line[j - 1], current_feedback)
+                current_feedback, delay_line[j] = split_pair_left(theta, strategy)
 
         # Record Schmidt data across the cut used while swapping the feedback
         # bin back through the delay line.
-        w_tau = _schmidt_weights(current_feedback)
-        schmidt_tau.append(np.sqrt(np.maximum(w_tau, 0.0))[: params.bond_max])
+        schmidt_tau.append(
+            (tau_singular_values / np.linalg.norm(tau_singular_values))[: params.bond_max]
+        )
         bond_dims_tau.append(int(current_feedback.shape[2]))
 
-        correlation_tensor, delayed_bin = split_pair_right(
-            theta_centered_on_delay, strategy
-        )
         delay_line[step + 1] = delayed_bin
         correlation_bins.append(correlation_tensor)
         last_feedback_center = _observable_copy(current_feedback)
