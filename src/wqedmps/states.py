@@ -25,6 +25,7 @@ which is the convention used throughout the library.
 
 __all__ = [
     "wg_ground",
+    "wg_nexcited",
     "tls_ground",
     "tls_excited",
     "vacuum",
@@ -61,6 +62,36 @@ def wg_ground(d_t: int, bond0: int = 1) -> np.ndarray:
     """
     state = np.zeros([bond0, d_t, bond0], dtype=complex)
     state[:, 0, :] = 1.0
+    return state
+
+
+def wg_nexcited(d_t: int, n: int, bond0: int = 1) -> np.ndarray:
+    """
+    Fock state |n> tensor for a single truncated bosonic mode.
+
+    Parameters
+    ----------
+    d_t : int
+        Size of the truncated Hilbert space.
+
+    n : int
+        Excitation number. Must satisfy 0 <= n < d_t.
+
+    bond0 : int, default: 1
+        Initial size of the bond dimension.
+
+    Returns
+    -------
+    state : ndarray
+        Local MPS tensor representing the bosonic Fock state |n>.
+    """
+    if n < 0:
+        raise ValueError("n must be >= 0")
+    if n >= d_t:
+        raise ValueError("n must be smaller than the local Hilbert-space dimension d_t")
+
+    state = np.zeros([bond0, d_t, bond0], dtype=complex)
+    state[:, n, :] = 1.0
     return state
 
 

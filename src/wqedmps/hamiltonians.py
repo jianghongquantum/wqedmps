@@ -25,6 +25,8 @@ Hamiltonian: TypeAlias = np.ndarray | Callable[[int], np.ndarray]
 __all__ = [
     "hamiltonian_1tls",
     "hamiltonian_1tls_feedback",
+    "hamiltonian_1nho",
+    "hamiltonian_1nho_feedback",
     "hamiltonian_2tls_mar",
     "hamiltonian_2tls_nmar",
     "hamiltonian_1tls_giant_open_nmar",
@@ -58,8 +60,6 @@ def _resolve_two_leg_couplings(
         float(default1 if gamma1 is None else gamma1),
         float(default2 if gamma2 is None else gamma2),
     )
-
-
 def hamiltonian_1tls(
     params: InputParams,
     omega: float | np.ndarray = 0,
@@ -164,6 +164,138 @@ def hamiltonian_1tls_feedback(
     else:
         H_sys = np.kron(
             np.kron(I_t, delta * pe + 0.5 * float(omega) * (sp + sm)),
+            I_t,
+        )
+        hm_total = (H_sys + H_fb + H_now) * delta_t
+
+    return hm_total
+
+
+def hamiltonian_1nho(
+    params: InputParams,
+    omega: float | np.ndarray = 0,
+    delta: float = 0,
+    U: float | None = None,
+) -> Hamiltonian:
+    """
+    One nonlinear harmonic oscillator + bidirectional waveguide time bin.
+    Returns H * delta_t.
+    """
+    delta_t = params.delta_t
+    d_t_total = np.asarray(params.d_t_total, dtype=int)
+    d_sys_total = np.asarray(params.d_sys_total, dtype=int)
+
+    gamma_l = params.gamma_l
+    gamma_r = params.gamma_r
+    U = params.U if U is None else float(U)
+
+    d_sys = int(np.prod(d_sys_total))
+    d_t = int(np.prod(d_t_total))
+
+    osc_a = a(d_sys)
+    osc_adag = a_dag(d_sys)
+    osc_n = num_op(d_sys)
+    I_sys = np.eye(d_sys, dtype=complex)
+    I_t = np.eye(d_t, dtype=complex)
+
+    H_int_l = np.sqrt(gamma_l / delta_t) * (
+        np.kron(osc_a, a_dag_l(d_t_total)) + np.kron(osc_adag, a_l(d_t_total))
+    )
+    H_int_r = np.sqrt(gamma_r / delta_t) * (
+        np.kron(osc_a, a_dag_r(d_t_total)) + np.kron(osc_adag, a_r(d_t_total))
+    )
+
+    if isinstance(omega, np.ndarray):
+        omega = np.asarray(omega, dtype=float)
+
+        def hm_total(t_k: int) -> np.ndarray:
+            H_sys = np.kron(
+                delta * osc_n
+                + 0.5 * U * (osc_n @ (osc_n - I_sys))
+                + 0.5 * omega[t_k] * (osc_adag + osc_a),
+                I_t,
+            )
+            return (H_sys + H_int_l + H_int_r) * delta_t
+
+    else:
+        H_sys = np.kron(
+            delta * osc_n
+            + 0.5 * U * (osc_n @ (osc_n - I_sys))
+            + 0.5 * float(omega) * (osc_adag + osc_a),
+            I_t,
+        )
+        hm_total = (H_sys + H_int_l + H_int_r) * delta_t
+
+    return hm_total
+
+
+def hamiltonian_1nho_feedback(
+    params: InputParams,
+    omega: float | np.ndarray = 0,
+    delta: float = 0,
+    U: float | None = None,
+) -> Hamiltonian:
+    """
+    One nonlinear harmonic oscillator with feedback / semi-infinite waveguide.
+
+    Hilbert-space ordering:
+        [feedback_bin] ⊗ [system] ⊗ [current_bin]
+
+    Returns H * delta_t.
+    """
+    delta_t = params.delta_t
+    d_t_total = np.asarray(params.d_t_total, dtype=int)
+    d_sys_total = np.asarray(params.d_sys_total, dtype=int)
+
+    gamma_l = params.gamma_l
+    gamma_r = params.gamma_r
+    phase = params.phase
+    U = params.U if U is None else float(U)
+
+    d_sys = int(np.prod(d_sys_total))
+    d_t = int(np.prod(d_t_total))
+
+    osc_a = a(d_sys)
+    osc_adag = a_dag(d_sys)
+    osc_n = num_op(d_sys)
+    I_sys = np.eye(d_sys, dtype=complex)
+    I_t = np.eye(d_t, dtype=complex)
+
+    a_now = a(d_t)
+    adag_now = a_dag(d_t)
+
+    H_fb = np.sqrt(gamma_l / delta_t) * (
+        np.kron(np.kron(a_now * np.exp(-1j * phase), osc_adag), I_t)
+        + np.kron(np.kron(adag_now * np.exp(1j * phase), osc_a), I_t)
+    )
+
+    H_now = np.sqrt(gamma_r / delta_t) * (
+        np.kron(np.kron(I_t, osc_adag), a_now) + np.kron(np.kron(I_t, osc_a), adag_now)
+    )
+
+    if isinstance(omega, np.ndarray):
+        omega = np.asarray(omega, dtype=float)
+
+        def hm_total(t_k: int) -> np.ndarray:
+            H_sys = np.kron(
+                np.kron(
+                    I_t,
+                    delta * osc_n
+                    + 0.5 * U * (osc_n @ (osc_n - I_sys))
+                    + 0.5 * omega[t_k] * (osc_adag + osc_a),
+                ),
+                I_t,
+            )
+            return (H_sys + H_fb + H_now) * delta_t
+
+    else:
+        H_sys = np.kron(
+            np.kron(
+                I_t,
+                delta * osc_n
+                + 0.5 * U * (osc_n @ (osc_n - I_sys))
+                + 0.5 * float(omega) * (osc_adag + osc_a),
+            ),
             I_t,
         )
         hm_total = (H_sys + H_fb + H_now) * delta_t

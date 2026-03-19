@@ -92,6 +92,10 @@ class InputParams:
         Internal atom-cavity coupling strength, used by cavity-QED system
         Hamiltonians such as `hamiltonian_1tls_cavity_nmar`.
 
+    U : float
+        Kerr nonlinearity strength for nonlinear-oscillator system
+        Hamiltonians.
+
     tau : float
         Delay time.
 
@@ -114,6 +118,7 @@ class InputParams:
     gamma_l2: float = 0.0
     gamma_r2: float = 0.0
     g: float = 0.0
+    U: float = 0.0
     tau: float = 0.0
     phase: float = 0.0
     atol: float = 1e-12
@@ -140,6 +145,7 @@ class InputParams:
         self.gamma_l2 = float(self.gamma_l2)
         self.gamma_r2 = float(self.gamma_r2)
         self.g = float(self.g)
+        self.U = float(self.U)
 
         self.tau = float(self.tau)
         self.phase = float(self.phase)
