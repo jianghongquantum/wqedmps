@@ -25,14 +25,18 @@ Hamiltonian: TypeAlias = np.ndarray | Callable[[int], np.ndarray]
 __all__ = [
     "hamiltonian_1tls",
     "hamiltonian_1tls_feedback",
+    "hamiltonian_1tls_single_channel",
     "hamiltonian_1nho",
     "hamiltonian_1nho_feedback",
+    "hamiltonian_1nho_single_channel",
     "hamiltonian_2tls_mar",
     "hamiltonian_2tls_nmar",
     "hamiltonian_1tls_giant_open_nmar",
     "hamiltonian_1tls_cavity_nmar",
     "Hamiltonian",
 ]
+
+
 def _resolve_two_leg_couplings(
     gamma_primary: float,
     gamma_secondary: float,
@@ -60,6 +64,28 @@ def _resolve_two_leg_couplings(
         float(default1 if gamma1 is None else gamma1),
         float(default2 if gamma2 is None else gamma2),
     )
+
+
+def _resolve_single_channel_coupling(
+    gamma_primary: float,
+    gamma_fallback: float,
+    gamma: float | None,
+) -> float:
+    """
+    Resolve the coupling for a single-channel Markovian Hamiltonian.
+
+    By default use the "current-bin" coupling, falling back to the other
+    coupling if the primary one is zero.
+    """
+    if gamma is not None:
+        return float(gamma)
+
+    if abs(gamma_primary) > 0:
+        return float(gamma_primary)
+
+    return float(gamma_fallback)
+
+
 def hamiltonian_1tls(
     params: InputParams,
     omega: float | np.ndarray = 0,
@@ -101,6 +127,70 @@ def hamiltonian_1tls(
     else:
         H_sys = np.kron(delta * pe + 0.5 * float(omega) * (sp + sm), I_t)
         hm_total = (H_sys + H_int_l + H_int_r) * delta_t
+
+    return hm_total
+
+
+def hamiltonian_1tls_single_channel(
+    params: InputParams,
+    omega: float | np.ndarray = 0,
+    delta: float = 0,
+    gamma: float | None = None,
+) -> Hamiltonian:
+    """
+    One TLS + one single-channel Markovian waveguide bin.
+
+    Hilbert-space ordering:
+        [system] ⊗ [current_bin]
+
+    This mirrors the `H_now` part of `hamiltonian_1tls_feedback` while removing
+    the delayed feedback branch. By default it uses `params.gamma_r`, and falls
+    back to `params.gamma_l` if `gamma_r` is zero.
+
+    Returns H * delta_t.
+    """
+    delta_t = params.delta_t
+    d_t_total = np.asarray(params.d_t_total, dtype=int)
+    d_sys_total = np.asarray(params.d_sys_total, dtype=int)
+
+    if d_t_total.size != 1:
+        raise ValueError(
+            "hamiltonian_1tls_single_channel expects a single-channel bin "
+            "(len(d_t_total) == 1)."
+        )
+
+    if int(np.prod(d_sys_total)) != 2:
+        raise ValueError(
+            "hamiltonian_1tls_single_channel expects a single TLS system block "
+            "(prod(d_sys_total) == 2)."
+        )
+
+    gamma = _resolve_single_channel_coupling(params.gamma_r, params.gamma_l, gamma)
+
+    d_t = int(np.prod(d_t_total))
+
+    sp = sigma_plus()
+    sm = sigma_minus()
+    pe = proj_excited(2)
+    I_t = np.eye(d_t, dtype=complex)
+
+    a_now = a(d_t)
+    adag_now = a_dag(d_t)
+
+    H_now = np.sqrt(gamma / delta_t) * (
+        np.kron(sp, a_now) + np.kron(sm, adag_now)
+    )
+
+    if isinstance(omega, np.ndarray):
+        omega = np.asarray(omega, dtype=float)
+
+        def hm_total(t_k: int) -> np.ndarray:
+            H_sys = np.kron(delta * pe + 0.5 * omega[t_k] * (sp + sm), I_t)
+            return (H_sys + H_now) * delta_t
+
+    else:
+        H_sys = np.kron(delta * pe + 0.5 * float(omega) * (sp + sm), I_t)
+        hm_total = (H_sys + H_now) * delta_t
 
     return hm_total
 
@@ -167,6 +257,78 @@ def hamiltonian_1tls_feedback(
             I_t,
         )
         hm_total = (H_sys + H_fb + H_now) * delta_t
+
+    return hm_total
+
+
+def hamiltonian_1nho_single_channel(
+    params: InputParams,
+    omega: float | np.ndarray = 0,
+    delta: float = 0,
+    U: float | None = None,
+    gamma: float | None = None,
+) -> Hamiltonian:
+    """
+    One nonlinear harmonic oscillator + one single-channel Markovian waveguide bin.
+
+    Hilbert-space ordering:
+        [system] ⊗ [current_bin]
+
+    This mirrors the `H_now` part of `hamiltonian_1nho_feedback` while removing
+    the delayed feedback branch. By default it uses `params.gamma_r`, and falls
+    back to `params.gamma_l` if `gamma_r` is zero.
+
+    Returns H * delta_t.
+    """
+    delta_t = params.delta_t
+    d_t_total = np.asarray(params.d_t_total, dtype=int)
+    d_sys_total = np.asarray(params.d_sys_total, dtype=int)
+
+    if d_t_total.size != 1:
+        raise ValueError(
+            "hamiltonian_1nho_single_channel expects a single-channel bin "
+            "(len(d_t_total) == 1)."
+        )
+
+    gamma = _resolve_single_channel_coupling(params.gamma_r, params.gamma_l, gamma)
+    U = params.U if U is None else float(U)
+
+    d_sys = int(np.prod(d_sys_total))
+    d_t = int(np.prod(d_t_total))
+
+    osc_a = a(d_sys)
+    osc_adag = a_dag(d_sys)
+    osc_n = num_op(d_sys)
+    I_sys = np.eye(d_sys, dtype=complex)
+    I_t = np.eye(d_t, dtype=complex)
+
+    a_now = a(d_t)
+    adag_now = a_dag(d_t)
+
+    H_now = np.sqrt(gamma / delta_t) * (
+        np.kron(osc_adag, a_now) + np.kron(osc_a, adag_now)
+    )
+
+    if isinstance(omega, np.ndarray):
+        omega = np.asarray(omega, dtype=float)
+
+        def hm_total(t_k: int) -> np.ndarray:
+            H_sys = np.kron(
+                delta * osc_n
+                + 0.5 * U * (osc_n @ (osc_n - I_sys))
+                + 0.5 * omega[t_k] * (osc_adag + osc_a),
+                I_t,
+            )
+            return (H_sys + H_now) * delta_t
+
+    else:
+        H_sys = np.kron(
+            delta * osc_n
+            + 0.5 * U * (osc_n @ (osc_n - I_sys))
+            + 0.5 * float(omega) * (osc_adag + osc_a),
+            I_t,
+        )
+        hm_total = (H_sys + H_now) * delta_t
 
     return hm_total
 
