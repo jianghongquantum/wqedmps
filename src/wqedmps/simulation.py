@@ -45,7 +45,7 @@ from wqedmps.mps_tools import (
     swap_pair_tensor,
 )
 from wqedmps.operators import *
-from wqedmps.operators import u_evol
+from wqedmps.operators import apply_u_evol, u_evol
 from wqedmps.parameters import Bins, InputParams
 
 __all__ = ["t_evol_mar_seemps", "t_evol_mar", "t_evol_nmar_seemps", "t_evol_nmar"]
@@ -108,14 +108,8 @@ def t_evol_mar_seemps(
 
     strategy = strategy_from_params(params)
     times = np.arange(n_steps + 1) * delta_t
-
-    # Pre-compute all evolution gates before the main loop so that matrix
-    # exponentials are not recomputed inside the time-step iteration.
-    if callable(ham):
-        gates = [u_evol(ham(step), d_sys, d_bin) for step in range(n_steps)]
-    else:
-        _static_gate = u_evol(ham, d_sys, d_bin)
-        gates = [_static_gate] * n_steps
+    ham_is_callable = callable(ham)
+    static_gate = None if ham_is_callable else u_evol(ham, d_sys, d_bin)
 
     # Setup: dimensions, time grid, truncation strategy, and input generator.
     input_field = states.input_state_generator(
@@ -137,7 +131,7 @@ def t_evol_mar_seemps(
     last_correlation_centered = None
 
     for step in range(n_steps):
-        U_int = gates[step]
+        H_step = ham(step) if ham_is_callable else None
         input_bin = np.asarray(next(input_field), dtype=complex)
 
         # Step 1. Build the active pair [system | input] and center it on the
@@ -153,7 +147,10 @@ def t_evol_mar_seemps(
         # Step 2. Apply the local gate on the active pair. After the update the
         # right tensor is the interacting field bin, which becomes output.
         theta = pair_tensor(psi[0], psi[1])
-        theta = contract_cached("pqij,aijb->apqb", U_int, theta)
+        if ham_is_callable:
+            theta = apply_u_evol(H_step, theta)
+        else:
+            theta = contract_cached("pqij,aijb->apqb", static_gate, theta)
         psi.update_2site_right(theta, site=0, strategy=strategy)
         output_field_states.append(psi[1])
 
@@ -217,12 +214,8 @@ def t_evol_mar(
 
     strategy = strategy_from_params(params)
     times = np.arange(n_steps + 1) * delta_t
-
-    if callable(ham):
-        gates = [u_evol(ham(step), d_sys, d_bin) for step in range(n_steps)]
-    else:
-        _static_gate = u_evol(ham, d_sys, d_bin)
-        gates = [_static_gate] * n_steps
+    ham_is_callable = callable(ham)
+    static_gate = None if ham_is_callable else u_evol(ham, d_sys, d_bin)
 
     # Setup: dimensions, time grid, truncation strategy, and input generator.
     input_field = states.input_state_generator(
@@ -243,7 +236,7 @@ def t_evol_mar(
     bond_dims = [1]
 
     for step in range(n_steps):
-        U_int = gates[step]
+        H_step = ham(step) if ham_is_callable else None
         input_bin = np.asarray(next(input_field), dtype=complex)
 
         # Step 1. Form [system | input] and split it with the center on the
@@ -255,7 +248,10 @@ def t_evol_mar(
 
         # Step 2. Apply the local gate and split again so the interacting field
         # bin is stored as the emitted output.
-        theta = contract_cached("pqij,aijb->apqb", U_int, theta)
+        if ham_is_callable:
+            theta = apply_u_evol(H_step, theta)
+        else:
+            theta = contract_cached("pqij,aijb->apqb", static_gate, theta)
         i_s, output_bin = split_pair_right(theta, strategy)
         output_field_states.append(_observable_copy(output_bin))
 
@@ -341,12 +337,8 @@ def t_evol_nmar_seemps(
     d_bin = params.d_t
     strategy = strategy_from_params(params)
     times = np.arange(n_steps + 1) * delta_t
-
-    if callable(ham):
-        gates = [u_evol(ham(step), d_sys, d_bin, 2) for step in range(n_steps)]
-    else:
-        _static_gate = u_evol(ham, d_sys, d_bin, 2)
-        gates = [_static_gate] * n_steps
+    ham_is_callable = callable(ham)
+    static_gate = None if ham_is_callable else u_evol(ham, d_sys, d_bin, 2)
 
     input_field = states.input_state_generator(
         params.d_t_total,
@@ -374,7 +366,7 @@ def t_evol_nmar_seemps(
     last_feedback_center = None
 
     for step in range(n_steps):
-        U_int = gates[step]
+        H_step = ham(step) if ham_is_callable else None
 
         # Step 1. Move the feedback bin that is due to re-interact next to the
         # system by swapping it through the delay line.
@@ -396,13 +388,17 @@ def t_evol_nmar_seemps(
         input_field_states.append(_observable_copy(psi[2]))
 
         # Step 3. Apply the three-body local gate on the active block.
-        theta = contract_cached(
-            "aic,cjd,dkb,pqrijk->apqrb",
-            psi[0],
-            psi[1],
-            psi[2],
-            U_int,
-        )
+        if ham_is_callable:
+            theta = contract_cached("aic,cjd,dkb->aijkb", psi[0], psi[1], psi[2])
+            theta = apply_u_evol(H_step, theta)
+        else:
+            theta = contract_cached(
+                "aic,cjd,dkb,pqrijk->apqrb",
+                psi[0],
+                psi[1],
+                psi[2],
+                static_gate,
+            )
 
         # Step 4. First cut: separate the updated feedback branch from the
         # remaining [system | loop] block.
@@ -531,12 +527,8 @@ def t_evol_nmar(
     d_bin = params.d_t
     strategy = strategy_from_params(params)
     times = np.arange(n_steps + 1) * delta_t
-
-    if callable(ham):
-        gates = [u_evol(ham(step), d_sys, d_bin, 2) for step in range(n_steps)]
-    else:
-        _static_gate = u_evol(ham, d_sys, d_bin, 2)
-        gates = [_static_gate] * n_steps
+    ham_is_callable = callable(ham)
+    static_gate = None if ham_is_callable else u_evol(ham, d_sys, d_bin, 2)
 
     input_field = states.input_state_generator(
         params.d_t_total,
@@ -564,7 +556,7 @@ def t_evol_nmar(
     last_feedback_center = None
 
     for step in range(n_steps):
-        U_int = gates[step]
+        H_step = ham(step) if ham_is_callable else None
 
         # Step 1. Move the feedback bin that is due to re-interact next to the
         # system by swapping it through the delay line.
@@ -583,13 +575,19 @@ def t_evol_nmar(
         input_field_states.append(_observable_copy(input_bin_oc))
 
         # Step 3. Apply the three-body local gate on the active block.
-        theta = contract_cached(
-            "aic,cjd,dkb,pqrijk->apqrb",
-            feedback_left,
-            system_left,
-            input_bin_oc,
-            U_int,
-        )
+        if ham_is_callable:
+            theta = contract_cached(
+                "aic,cjd,dkb->aijkb", feedback_left, system_left, input_bin_oc
+            )
+            theta = apply_u_evol(H_step, theta)
+        else:
+            theta = contract_cached(
+                "aic,cjd,dkb,pqrijk->apqrb",
+                feedback_left,
+                system_left,
+                input_bin_oc,
+                static_gate,
+            )
 
         # Step 4. First cut: separate the updated feedback branch from the
         # remaining [system | loop] block.
@@ -658,6 +656,7 @@ def t_evol_nmar(
         correlation_bins.append(correlation_tensor)
         last_feedback_center = _observable_copy(current_feedback)
 
+        system_tensor = np.asarray(system_tensor, copy=True)
 
     # Finalize: replace the last correlation entry by the final emitted-bin
     # tensor so the end of the feedback-output chain is stored consistently.

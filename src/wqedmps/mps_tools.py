@@ -4,8 +4,13 @@ from functools import lru_cache
 
 import opt_einsum as oe
 import numpy as np
+from scipy.linalg import eigh
 
-from seemps.cython import _destructive_svd, _select_svd_driver, destructively_truncate_vector
+from seemps.cython import (
+    _destructive_svd,
+    _select_svd_driver,
+    destructively_truncate_vector,
+)
 from seemps.state import DEFAULT_STRATEGY
 from seemps.state.schmidt import _left_orth_2site, _right_orth_2site
 
@@ -23,21 +28,12 @@ __all__ = [
     "strategy_from_params",
 ]
 
-# Randomized SVD threshold: use RSVD when bond_max / min(m,n) < this value.
-# Set to 0.0 (disabled) by default because RSVD is only accurate when the
-# singular value spectrum decays fast enough that s[bond_max] << atol*s[0].
-# When bond_max is the binding constraint (not atol), RSVD introduces errors
-# comparable to the truncation error itself, which is unacceptable.
-# Enable (e.g. set to 0.4) only when atol is binding and bond_max is a loose cap.
-_RSVD_THRESHOLD = 0.0
-_RSVD_OVERSAMPLES = 10
-
 
 @lru_cache(maxsize=None)
 def _contract_expression(
     subscripts: str, operand_shapes: tuple[tuple[int, ...], ...]
 ):
-    return oe.contract_expression(subscripts, *operand_shapes, optimize="optimal")
+    return oe.contract_expression(subscripts, *operand_shapes, optimize="greedy")
 
 
 def contract_cached(subscripts: str, *operands: np.ndarray) -> np.ndarray:
@@ -93,96 +89,6 @@ def local_density_matrix(state: np.ndarray) -> np.ndarray:
     return contract_cached("aib,ajb->ij", state, np.conj(state))
 
 
-# ---------------------------------------------------------------------------
-# Randomized SVD
-# ---------------------------------------------------------------------------
-
-def _rsvd(
-    A: np.ndarray, k: int, n_oversamples: int = _RSVD_OVERSAMPLES
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Randomized range-finding SVD.  Returns the top-k left singular vectors,
-    singular values (descending), and right singular vectors of A.
-
-    For complex MPS tensors the random projections are drawn from the complex
-    standard normal distribution so the column-space estimate is unbiased.
-
-    The approximation error is governed by the (k+1)-th singular value of A
-    times a small constant that decreases exponentially with n_oversamples.
-    With the default n_oversamples=10 the error is negligible compared to any
-    MPS truncation tolerance larger than machine epsilon.
-    """
-    m, n = A.shape
-    l = min(k + n_oversamples, min(m, n))
-
-    # Complex Gaussian sketch matrix — spans column or row space of A.
-    if m <= n:
-        Omega = (np.random.standard_normal((n, l))
-                 + 1j * np.random.standard_normal((n, l))) * (0.5 ** 0.5)
-        Q, _ = np.linalg.qr(A @ Omega)          # (m, l) orthonormal cols
-        B = Q.conj().T @ A                       # (l, n) small matrix
-        Ub, s, Vh = np.linalg.svd(B, full_matrices=False)
-        U = Q @ Ub                               # (m, l)
-    else:
-        Omega = (np.random.standard_normal((m, l))
-                 + 1j * np.random.standard_normal((m, l))) * (0.5 ** 0.5)
-        Q, _ = np.linalg.qr(A.conj().T @ Omega) # (n, l) orthonormal cols
-        B = A @ Q                                # (m, l) small matrix
-        U, s, Vb = np.linalg.svd(B, full_matrices=False)
-        Vh = (Q @ Vb.conj().T).conj().T         # (l, n)
-
-    return U[:, :k], s[:k], Vh[:k, :]
-
-
-# ---------------------------------------------------------------------------
-# Unified split helper
-# ---------------------------------------------------------------------------
-
-def _svd_split(
-    theta: np.ndarray, strategy
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    SVD of a reshaped two-site tensor followed by truncation.
-
-    Chooses randomized SVD when bond_max is small relative to the matrix
-    dimensions (the kept fraction is below _RSVD_THRESHOLD), and falls back
-    to the full LAPACK decomposition otherwise.
-
-    Returns U (left singular vectors), s (singular values), Vh (right
-    singular vectors) — all already truncated to the kept bond dimension D.
-    """
-    a, d1, d2, b = theta.shape
-    m, n = a * d1, d2 * b
-    _bond = strategy.get_max_bond_dimension()
-    k_max: int = min(_bond, min(m, n)) if _bond else min(m, n)
-    tol: float = strategy.get_tolerance()
-
-    use_rsvd = k_max < min(m, n) * _RSVD_THRESHOLD
-
-    if use_rsvd:
-        U, s, Vh = _rsvd(theta.reshape(m, n), k_max)
-        # Apply relative tolerance truncation on the randomized result.
-        if tol > 0 and len(s) > 0:
-            cutoff = int(np.searchsorted(-s, -tol * s[0])) + 1
-            k = min(k_max, cutoff)
-        else:
-            k = k_max
-        k = max(1, min(k, len(s)))
-        U, s, Vh = U[:, :k], s[:k], Vh[:k, :]
-    else:
-        # Full LAPACK SVD via seemps (destructive: theta's memory is reused).
-        U, s, Vh = _destructive_svd(theta.reshape(m, n))
-        destructively_truncate_vector(s, strategy)
-        D = int(s.shape[0])
-        U, s, Vh = U[:, :D], s[:D], Vh[:D, :]
-
-    return U, s, Vh
-
-
-# ---------------------------------------------------------------------------
-# Public split functions
-# ---------------------------------------------------------------------------
-
 def split_pair_left(
     theta: np.ndarray,
     strategy,
@@ -190,6 +96,14 @@ def split_pair_left(
     """
     Split a two-site tensor and keep the orthogonality center on the left site.
     """
+    fast_svd = _topk_svd_for_theta(theta, strategy)
+    if fast_svd is not None:
+        U, s, Vh = fast_svd
+        a, d1, d2, b = theta.shape
+        left = (U * s).reshape(a, d1, s.shape[0])
+        right = Vh.reshape(s.shape[0], d2, b)
+        return left, right
+
     left, right, _ = _right_orth_2site(theta, strategy)
     return left, right
 
@@ -201,6 +115,14 @@ def split_pair_right(
     """
     Split a two-site tensor and keep the orthogonality center on the right site.
     """
+    fast_svd = _topk_svd_for_theta(theta, strategy)
+    if fast_svd is not None:
+        U, s, Vh = fast_svd
+        a, d1, d2, b = theta.shape
+        left = U.reshape(a, d1, s.shape[0])
+        right = (s[:, None] * Vh).reshape(s.shape[0], d2, b)
+        return left, right
+
     left, right, _ = _left_orth_2site(theta, strategy)
     return left, right
 
@@ -223,14 +145,110 @@ def split_pair_both(
       decompositions
     """
     a, d1, d2, b = theta.shape
-    U, s, Vh = _svd_split(theta, strategy)
-    D = len(s)
+    fast_svd = _topk_svd_for_theta(theta, strategy)
+    if fast_svd is None:
+        U, s, Vh = _destructive_svd(theta.reshape(a * d1, d2 * b))
+        destructively_truncate_vector(s, strategy)
+        D = int(s.shape[0])
+
+        U = U[:, :D]
+        Vh = Vh[:D, :]
+    else:
+        U, s, Vh = fast_svd
+        D = int(s.shape[0])
 
     left_isometric = U.reshape(a, d1, D)
     right_isometric = Vh.reshape(D, d2, b)
     left_centered = (U * s).reshape(a, d1, D)
     right_centered = (s[:, None] * Vh).reshape(D, d2, b)
     return left_centered, right_isometric, left_isometric, right_centered, s
+
+
+def _topk_svd_for_theta(
+    theta: np.ndarray,
+    strategy,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """
+    Compute the leading SVD components for splits dominated by ``bond_max``.
+
+    The delayed-feedback hot path repeatedly decomposes matrices that keep only
+    ``bond_max`` singular values. For those cases a Hermitian top-k eigensolve
+    avoids computing the discarded singular vectors. Smaller or nearly
+    untruncated splits continue to use SeeMPS' default SVD.
+    """
+    a, d1, d2, b = theta.shape
+    rows = a * d1
+    cols = d2 * b
+    min_dim = min(rows, cols)
+
+    max_bond = int(strategy.get_max_bond_dimension())
+    if max_bond <= 0:
+        return None
+
+    if max_bond >= min_dim or min_dim < 3 * max_bond:
+        return None
+    if float(strategy.get_tolerance()) > 1.0e-8:
+        return None
+
+    matrix = theta.reshape(rows, cols)
+    try:
+        return _topk_svd(matrix, max_bond, strategy)
+    except Exception:
+        return None
+
+
+def _topk_svd(
+    matrix: np.ndarray,
+    max_bond: int,
+    strategy,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    rows, cols = matrix.shape
+    stable_cutoff = np.sqrt(np.finfo(float).eps)
+    if rows <= cols:
+        gram = matrix @ matrix.conj().T
+        eigvals, U = eigh(
+            gram,
+            subset_by_index=[rows - max_bond, rows - 1],
+            check_finite=False,
+            driver="evr",
+        )
+        order = np.argsort(eigvals)[::-1]
+        eigvals = eigvals[order]
+        U = U[:, order]
+        s = np.sqrt(np.maximum(eigvals, 0.0))
+        if (
+            s.size == 0
+            or not np.isfinite(s[0])
+            or s[-1] <= stable_cutoff * s[0]
+        ):
+            return None
+        Vh = (U.conj().T @ matrix) / s[:, None]
+    else:
+        gram = matrix.conj().T @ matrix
+        eigvals, V = eigh(
+            gram,
+            subset_by_index=[cols - max_bond, cols - 1],
+            check_finite=False,
+            driver="evr",
+        )
+        order = np.argsort(eigvals)[::-1]
+        eigvals = eigvals[order]
+        V = V[:, order]
+        s = np.sqrt(np.maximum(eigvals, 0.0))
+        if (
+            s.size == 0
+            or not np.isfinite(s[0])
+            or s[-1] <= stable_cutoff * s[0]
+        ):
+            return None
+        U = (matrix @ V) / s[None, :]
+        Vh = V.conj().T
+
+    destructively_truncate_vector(s, strategy)
+    D = int(s.shape[0])
+    if D == 0:
+        return None
+    return U[:, :D], s, Vh[:D, :]
 
 
 def strategy_from_params(params: InputParams):
