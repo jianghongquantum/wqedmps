@@ -108,8 +108,14 @@ def t_evol_mar_seemps(
 
     strategy = strategy_from_params(params)
     times = np.arange(n_steps + 1) * delta_t
-    ham_is_callable = callable(ham)
-    static_gate = None if ham_is_callable else u_evol(ham, d_sys, d_bin)
+
+    # Pre-compute all evolution gates before the main loop so that matrix
+    # exponentials are not recomputed inside the time-step iteration.
+    if callable(ham):
+        gates = [u_evol(ham(step), d_sys, d_bin) for step in range(n_steps)]
+    else:
+        _static_gate = u_evol(ham, d_sys, d_bin)
+        gates = [_static_gate] * n_steps
 
     # Setup: dimensions, time grid, truncation strategy, and input generator.
     input_field = states.input_state_generator(
@@ -131,7 +137,7 @@ def t_evol_mar_seemps(
     last_correlation_centered = None
 
     for step in range(n_steps):
-        U_int = u_evol(ham(step), d_sys, d_bin) if ham_is_callable else static_gate
+        U_int = gates[step]
         input_bin = np.asarray(next(input_field), dtype=complex)
 
         # Step 1. Build the active pair [system | input] and center it on the
@@ -211,8 +217,12 @@ def t_evol_mar(
 
     strategy = strategy_from_params(params)
     times = np.arange(n_steps + 1) * delta_t
-    ham_is_callable = callable(ham)
-    static_gate = None if ham_is_callable else u_evol(ham, d_sys, d_bin)
+
+    if callable(ham):
+        gates = [u_evol(ham(step), d_sys, d_bin) for step in range(n_steps)]
+    else:
+        _static_gate = u_evol(ham, d_sys, d_bin)
+        gates = [_static_gate] * n_steps
 
     # Setup: dimensions, time grid, truncation strategy, and input generator.
     input_field = states.input_state_generator(
@@ -233,7 +243,7 @@ def t_evol_mar(
     bond_dims = [1]
 
     for step in range(n_steps):
-        U_int = u_evol(ham(step), d_sys, d_bin) if ham_is_callable else static_gate
+        U_int = gates[step]
         input_bin = np.asarray(next(input_field), dtype=complex)
 
         # Step 1. Form [system | input] and split it with the center on the
@@ -331,8 +341,12 @@ def t_evol_nmar_seemps(
     d_bin = params.d_t
     strategy = strategy_from_params(params)
     times = np.arange(n_steps + 1) * delta_t
-    ham_is_callable = callable(ham)
-    static_gate = None if ham_is_callable else u_evol(ham, d_sys, d_bin, 2)
+
+    if callable(ham):
+        gates = [u_evol(ham(step), d_sys, d_bin, 2) for step in range(n_steps)]
+    else:
+        _static_gate = u_evol(ham, d_sys, d_bin, 2)
+        gates = [_static_gate] * n_steps
 
     input_field = states.input_state_generator(
         params.d_t_total,
@@ -360,9 +374,7 @@ def t_evol_nmar_seemps(
     last_feedback_center = None
 
     for step in range(n_steps):
-        U_int = (
-            u_evol(ham(step), d_sys, d_bin, 2) if ham_is_callable else static_gate
-        )
+        U_int = gates[step]
 
         # Step 1. Move the feedback bin that is due to re-interact next to the
         # system by swapping it through the delay line.
@@ -519,8 +531,12 @@ def t_evol_nmar(
     d_bin = params.d_t
     strategy = strategy_from_params(params)
     times = np.arange(n_steps + 1) * delta_t
-    ham_is_callable = callable(ham)
-    static_gate = None if ham_is_callable else u_evol(ham, d_sys, d_bin, 2)
+
+    if callable(ham):
+        gates = [u_evol(ham(step), d_sys, d_bin, 2) for step in range(n_steps)]
+    else:
+        _static_gate = u_evol(ham, d_sys, d_bin, 2)
+        gates = [_static_gate] * n_steps
 
     input_field = states.input_state_generator(
         params.d_t_total,
@@ -548,9 +564,7 @@ def t_evol_nmar(
     last_feedback_center = None
 
     for step in range(n_steps):
-        U_int = (
-            u_evol(ham(step), d_sys, d_bin, 2) if ham_is_callable else static_gate
-        )
+        U_int = gates[step]
 
         # Step 1. Move the feedback bin that is due to re-interact next to the
         # system by swapping it through the delay line.
@@ -644,7 +658,6 @@ def t_evol_nmar(
         correlation_bins.append(correlation_tensor)
         last_feedback_center = _observable_copy(current_feedback)
 
-        system_tensor = np.asarray(system_tensor, copy=True)
 
     # Finalize: replace the last correlation entry by the final emitted-bin
     # tensor so the end of the feedback-output chain is stored consistently.
