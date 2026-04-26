@@ -32,6 +32,7 @@ __all__ = [
     "hamiltonian_2tls_mar",
     "hamiltonian_2tls_nmar",
     "hamiltonian_1tls_giant_open_nmar",
+    "hamiltonian_1nho_giant_open_nmar",
     "hamiltonian_1tls_cavity_nmar",
     "Hamiltonian",
 ]
@@ -767,6 +768,100 @@ def hamiltonian_1tls_giant_open_nmar(
 
     else:
         Hs = delta * pe + 0.5 * float(omega) * (sp + sm)
+        hm_total = (np.kron(np.kron(I_t, Hs), I_t) + H_leg1 + H_leg2) * delta_t
+
+    return hm_total
+
+
+def hamiltonian_1nho_giant_open_nmar(
+    params: InputParams,
+    omega: float | np.ndarray = 0,
+    delta: float = 0,
+    U: float | None = None,
+    gamma1_l: float | None = None,
+    gamma1_r: float | None = None,
+    gamma2_l: float | None = None,
+    gamma2_r: float | None = None,
+) -> Hamiltonian:
+    """
+    One giant nonlinear oscillator/resonator in an open waveguide.
+
+    Hilbert-space ordering:
+        [delayed_bin] -> [resonator] -> [current_bin]
+
+    Each time bin contains two propagation channels, so
+    `params.d_t_total` should be `[d_left, d_right]`.
+
+    The first coupling point acts on the current bin and the second coupling
+    point acts on the delayed bin with propagation phase `params.phase`.
+    The resonator system term matches `hamiltonian_1nho`; setting `U = 0`
+    gives the linear-resonator limit.
+
+    Returns H * delta_t.
+    """
+    delta_t = params.delta_t
+    phase = params.phase
+    U = params.U if U is None else float(U)
+
+    d_sys_total = np.asarray(params.d_sys_total, dtype=int)
+    d_t_total = np.asarray(params.d_t_total, dtype=int)
+
+    gamma1_l, gamma2_l = _resolve_two_leg_couplings(
+        params.gamma_l,
+        params.gamma_l2,
+        gamma1_l,
+        gamma2_l,
+    )
+    gamma1_r, gamma2_r = _resolve_two_leg_couplings(
+        params.gamma_r,
+        params.gamma_r2,
+        gamma1_r,
+        gamma2_r,
+    )
+
+    d_sys = int(np.prod(d_sys_total))
+    d_t = int(np.prod(d_t_total))
+
+    I_sys = np.eye(d_sys, dtype=complex)
+    I_t = np.eye(d_t, dtype=complex)
+
+    osc_a = a(d_sys)
+    osc_adag = a_dag(d_sys)
+    osc_n = num_op(d_sys)
+
+    H_leg1 = np.sqrt(gamma1_l / delta_t) * (
+        np.kron(np.kron(I_t, osc_a), a_dag_l(d_t_total))
+        + np.kron(np.kron(I_t, osc_adag), a_l(d_t_total))
+    ) + np.sqrt(gamma1_r / delta_t) * (
+        np.kron(np.kron(I_t, osc_a), a_dag_r(d_t_total))
+        + np.kron(np.kron(I_t, osc_adag), a_r(d_t_total))
+    )
+
+    H_leg2 = np.sqrt(gamma2_l / delta_t) * (
+        np.kron(np.kron(a_dag_l(d_t_total) * np.exp(1j * phase), osc_a), I_t)
+        + np.kron(np.kron(a_l(d_t_total) * np.exp(-1j * phase), osc_adag), I_t)
+    ) + np.sqrt(gamma2_r / delta_t) * (
+        np.kron(np.kron(a_dag_r(d_t_total) * np.exp(1j * phase), osc_a), I_t)
+        + np.kron(np.kron(a_r(d_t_total) * np.exp(-1j * phase), osc_adag), I_t)
+    )
+
+    if isinstance(omega, np.ndarray):
+        omega = np.asarray(omega, dtype=float)
+
+        def hm_total(t_k: int) -> np.ndarray:
+            Hs = (
+                delta * osc_n
+                + 0.5 * U * (osc_n @ (osc_n - I_sys))
+                + 0.5 * omega[t_k] * (osc_adag + osc_a)
+            )
+            return (np.kron(np.kron(I_t, Hs), I_t) + H_leg1 + H_leg2) * delta_t
+
+    else:
+        Hs = (
+            delta * osc_n
+            + 0.5 * U * (osc_n @ (osc_n - I_sys))
+            + 0.5 * float(omega) * (osc_adag + osc_a)
+        )
         hm_total = (np.kron(np.kron(I_t, Hs), I_t) + H_leg1 + H_leg2) * delta_t
 
     return hm_total

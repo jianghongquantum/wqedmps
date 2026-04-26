@@ -73,6 +73,7 @@ The main high-level entry points are:
 - `hamiltonian_1tls_feedback()` for one TLS with delayed feedback
 - `hamiltonian_2tls_mar()` and `hamiltonian_2tls_nmar()` for two-emitter setups
 - `hamiltonian_1tls_giant_open_nmar()` for giant-atom non-Markovian geometries
+- `hamiltonian_1nho_giant_open_nmar()` for giant-resonator / Kerr-resonator non-Markovian geometries
 - `hamiltonian_1tls_cavity_nmar()` for TLS-cavity systems coupled to a delayed waveguide
 
 These Hamiltonians are typically paired with either `t_evol_mar_seemps()` / `t_evol_mar()` or `t_evol_nmar_seemps()` / `t_evol_nmar()`, depending on whether the problem is Markovian or delayed-feedback.
