@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 from scipy.linalg import expm
+from scipy.sparse import csr_matrix
+from scipy.sparse.linalg import expm_multiply
 
 from .mps_tools import contract_cached
 from .parameters import InputParams
@@ -50,6 +52,7 @@ __all__ = [
     "a_dag_r",
     "num_op_r",
     "u_evol",
+    "apply_u_evol",
     "swap_gate",
     "op_list_check",
     "expectation_1bin",
@@ -286,6 +289,47 @@ def u_evol(
 
     shape = (((d_t,) * (interacting_timebins_num - 1)) + (d_sys,) + (d_t,)) * 2
     return expm(-1j * H).reshape(shape)
+
+
+def apply_u_evol(
+    H: np.ndarray,
+    theta: np.ndarray,
+    sparse_density_threshold: float = 0.15,
+    min_expm_multiply_dim: int = 64,
+) -> np.ndarray:
+    """
+    Apply ``exp(-1j * H)`` directly to the physical axes of a local tensor.
+
+    ``theta`` must have the standard local-block layout
+    ``(bond_left, physical..., bond_right)``. This avoids materializing the
+    full dense evolution gate for time-dependent Hamiltonians.
+    """
+    phys_shape = theta.shape[1:-1]
+    phys_dim = int(np.prod(phys_shape))
+    if H.shape != (phys_dim, phys_dim):
+        raise ValueError(
+            f"Hamiltonian shape {H.shape} does not match physical dimension {phys_dim}"
+        )
+
+    theta_matrix = theta.transpose(
+        *range(1, theta.ndim - 1), 0, theta.ndim - 1
+    ).reshape(phys_dim, -1)
+
+    generator = -1j * H
+    if phys_dim < min_expm_multiply_dim:
+        evolved = expm(generator) @ theta_matrix
+        return evolved.reshape(*phys_shape, theta.shape[0], theta.shape[-1]).transpose(
+            len(phys_shape), *range(len(phys_shape)), len(phys_shape) + 1
+        )
+
+    density = np.count_nonzero(generator) / generator.size
+    if density <= sparse_density_threshold:
+        generator = csr_matrix(generator)
+
+    evolved = expm_multiply(generator, theta_matrix)
+    return evolved.reshape(*phys_shape, theta.shape[0], theta.shape[-1]).transpose(
+        len(phys_shape), *range(len(phys_shape)), len(phys_shape) + 1
+    )
 
 
 # ============================================================
