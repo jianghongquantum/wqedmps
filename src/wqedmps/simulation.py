@@ -71,6 +71,33 @@ def _observable_copy(tensor: np.ndarray) -> np.ndarray:
     return snapshot
 
 
+def _normalized_schmidt_coefficients(
+    singular_values: np.ndarray,
+    max_bond: int,
+) -> np.ndarray:
+    """
+    Normalize a truncated Schmidt singular-value spectrum.
+    """
+    s = np.asarray(singular_values, dtype=float).reshape(-1)[:max_bond]
+    norm = float(np.linalg.norm(s))
+    if norm > 0.0:
+        s = s / norm
+    return s
+
+
+def _pair_schmidt_coefficients(
+    theta: np.ndarray,
+    max_bond: int,
+) -> np.ndarray:
+    """
+    Schmidt coefficients across the middle cut of a two-site tensor.
+    """
+    left_bond, d_left, d_right, right_bond = theta.shape
+    matrix = theta.reshape(left_bond * d_left, d_right * right_bond)
+    singular_values = np.linalg.svd(matrix, compute_uv=False)
+    return _normalized_schmidt_coefficients(singular_values, max_bond)
+
+
 def t_evol_mar_seemps(
     ham: Hamiltonian,
     i_s0: np.ndarray,
@@ -159,8 +186,13 @@ def t_evol_mar_seemps(
         # while the left tensor is kept for correlation functions.
         theta = swap_pair_tensor(psi[0], psi[1])
         psi.update_2site_right(theta, site=0, strategy=strategy)
+        schmidt_vals = _pair_schmidt_coefficients(
+            pair_tensor(psi[0], psi[1]),
+            psi[0].shape[2],
+        )
         correlation_bins.append(psi[0])
-        schmidt.append(psi.Schmidt_weights())
+        schmidt.append(schmidt_vals)
+        bond_dims.append(int(psi[0].shape[2]))
         psi_sys = psi[1]
         system_states.append(psi[1])
 
@@ -176,6 +208,7 @@ def t_evol_mar_seemps(
         input_field_states=input_field_states,
         correlation_bins=correlation_bins,
         schmidt=schmidt,
+        bond_dims=bond_dims,
         times=times,
     )
 
@@ -266,7 +299,7 @@ def t_evol_mar(
         ) = split_pair_both(swap_pair_tensor(i_s, output_bin), strategy)
 
         # Step 4. Record Schmidt and bond-dimension data across the active cut.
-        schmidt.append((schmidt_vals / np.linalg.norm(schmidt_vals))[: params.bond_max])
+        schmidt.append(_normalized_schmidt_coefficients(schmidt_vals, params.bond_max))
         bond_dims.append(int(correlation_tensor.shape[2]))
 
         # Step 5. Store the propagated system tensor and the left tensor used by
@@ -427,7 +460,7 @@ def t_evol_nmar_seemps(
         loop_field_states.append(_observable_copy(loop_bin_oc))
 
         # Record Schmidt data across the active feedback|loop cut.
-        schmidt.append((schmidt_vals / np.linalg.norm(schmidt_vals))[: params.bond_max])
+        schmidt.append(_normalized_schmidt_coefficients(schmidt_vals, params.bond_max))
         bond_dims.append(int(feedback_left_mid.shape[2]))
 
         # Step 7. Store the emitted feedback snapshot and write the updated
@@ -459,7 +492,7 @@ def t_evol_nmar_seemps(
         # Record Schmidt data across the cut used while swapping the feedback
         # bin back through the delay line.
         schmidt_tau.append(
-            (tau_singular_values / np.linalg.norm(tau_singular_values))[: params.bond_max]
+            _normalized_schmidt_coefficients(tau_singular_values, params.bond_max)
         )
         bond_dims_tau.append(int(current_feedback.shape[2]))
 
@@ -618,7 +651,7 @@ def t_evol_nmar(
         loop_field_states.append(_observable_copy(loop_bin_oc))
 
         # Record Schmidt data across the active feedback|loop cut.
-        schmidt.append((schmidt_vals / np.linalg.norm(schmidt_vals))[: params.bond_max])
+        schmidt.append(_normalized_schmidt_coefficients(schmidt_vals, params.bond_max))
         bond_dims.append(int(feedback_left_mid.shape[2]))
 
         output_field_states.append(_observable_copy(feedback_bin_centered))
@@ -648,7 +681,7 @@ def t_evol_nmar(
         # Record Schmidt data across the cut used while swapping the feedback
         # bin back through the delay line.
         schmidt_tau.append(
-            (tau_singular_values / np.linalg.norm(tau_singular_values))[: params.bond_max]
+            _normalized_schmidt_coefficients(tau_singular_values, params.bond_max)
         )
         bond_dims_tau.append(int(current_feedback.shape[2]))
 

@@ -502,12 +502,20 @@ def entanglement(schmidt: list[np.ndarray]) -> list[float]:
     For each Schmidt spectrum s:
         p_i = s_i^2
         S = - sum_i p_i log2 p_i
+
+    The probabilities are normalized before evaluating the entropy to avoid
+    small drift from truncation or floating-point roundoff.
     """
     out: list[float] = []
 
     for s in schmidt:
-        p = np.asarray(s, dtype=float) ** 2
+        p = np.asarray(s, dtype=float).reshape(-1) ** 2
         p = p[p > 0]
+        norm = float(p.sum())
+        if norm <= 0.0:
+            out.append(0.0)
+            continue
+        p = p / norm
         out.append(float(-(p * np.log2(p)).sum()))
 
     return out
