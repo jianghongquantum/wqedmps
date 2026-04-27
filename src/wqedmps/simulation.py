@@ -48,7 +48,13 @@ from wqedmps.operators import *
 from wqedmps.operators import apply_u_evol, u_evol
 from wqedmps.parameters import Bins, InputParams
 
-__all__ = ["t_evol_mar_seemps", "t_evol_mar", "t_evol_nmar_seemps", "t_evol_nmar"]
+__all__ = [
+    "t_evol_mar_seemps",
+    "t_evol_mar",
+    "t_evol_nmar_seemps",
+    "t_evol_nmar",
+    "t_evol_nmar_2delay",
+]
 
 
 def _observable_copy(tensor: np.ndarray) -> np.ndarray:
@@ -96,6 +102,65 @@ def _pair_schmidt_coefficients(
     matrix = theta.reshape(left_bond * d_left, d_right * right_bond)
     singular_values = np.linalg.svd(matrix, compute_uv=False)
     return _normalized_schmidt_coefficients(singular_values, max_bond)
+
+
+def _move_site_right(
+    tensors: list[np.ndarray],
+    source: int,
+    target: int,
+    strategy,
+) -> int:
+    """
+    Move one MPS site to a larger index by nearest-neighbor swaps.
+    """
+    if source > target:
+        raise ValueError("source must be <= target")
+    site = int(source)
+    while site < target:
+        theta = swap_pair_tensor(tensors[site], tensors[site + 1])
+        tensors[site], tensors[site + 1] = split_pair_right(theta, strategy)
+        site += 1
+    return site
+
+
+def _move_site_left(
+    tensors: list[np.ndarray],
+    source: int,
+    target: int,
+    strategy,
+) -> int:
+    """
+    Move one MPS site to a smaller index by nearest-neighbor swaps.
+    """
+    if source < target:
+        raise ValueError("source must be >= target")
+    site = int(source)
+    while site > target:
+        theta = swap_pair_tensor(tensors[site - 1], tensors[site])
+        tensors[site - 1], tensors[site] = split_pair_left(theta, strategy)
+        site -= 1
+    return site
+
+
+def _canonicalized_tensor_list(
+    tensors: list[np.ndarray],
+    center: int,
+    strategy,
+) -> list[np.ndarray]:
+    """
+    Rebuild a tensor list in canonical form around ``center``.
+
+    The two-delay evolution performs many nonlocal swaps. Re-centering the
+    chain keeps one-site observables and subsequent local SVDs in a controlled
+    gauge.
+    """
+    psi = CanonicalMPS(
+        tensors,
+        center=int(center),
+        normalize=False,
+        strategy=strategy,
+    )
+    return [np.asarray(psi[i], dtype=complex) for i in range(len(psi))]
 
 
 def t_evol_mar_seemps(
@@ -695,6 +760,198 @@ def t_evol_nmar(
     # tensor so the end of the feedback-output chain is stored consistently.
     if n_steps > 0 and last_feedback_center is not None:
         correlation_bins[-1] = last_feedback_center
+
+    return Bins(
+        system_states=system_states,
+        loop_field_states=loop_field_states,
+        output_field_states=output_field_states,
+        input_field_states=input_field_states,
+        correlation_bins=correlation_bins,
+        schmidt=schmidt,
+        bond_dims=bond_dims,
+        schmidt_tau=schmidt_tau,
+        bond_dims_tau=bond_dims_tau,
+        times=times,
+    )
+
+
+def t_evol_nmar_2delay(
+    ham: Hamiltonian,
+    i_s0: np.ndarray,
+    i_n0: np.ndarray | list[np.ndarray],
+    params: InputParams,
+    tau_short: float,
+    tau_long: float,
+) -> Bins:
+    """
+    Evolve a single-waveguide three-coupling-point problem with two delays.
+
+    The time-bin chain is shared by both delayed interactions. At each step the
+    active local block is ordered as
+
+        [long_delay_bin | short_delay_bin | system | current_bin].
+
+    A bin emitted at the current coupling point first re-interacts after
+    ``tau_short`` and then again after ``tau_long``. This routine therefore
+    preserves one common delay line rather than introducing two independent
+    field copies.
+
+    Parameters
+    ----------
+    tau_short, tau_long:
+        Delay times of the middle and far coupling points relative to the
+        current coupling point. They must satisfy
+        ``delta_t < tau_short < tau_long`` after discretization.
+    """
+
+    delta_t = params.delta_t
+    n_steps = params.steps
+    short_steps = int(round(float(tau_short) / delta_t))
+    long_steps = int(round(float(tau_long) / delta_t))
+
+    if short_steps <= 1:
+        raise ValueError("tau_short must satisfy tau_short > delta_t")
+    if long_steps <= short_steps:
+        raise ValueError("tau_long must be larger than tau_short")
+
+    d_sys = params.d_sys
+    d_bin = params.d_t
+    strategy = strategy_from_params(params)
+    times = np.arange(n_steps + 1) * delta_t
+    ham_is_callable = callable(ham)
+    static_gate = None if ham_is_callable else u_evol(ham, d_sys, d_bin, 3)
+
+    input_field = states.input_state_generator(
+        params.d_t_total,
+        input_bins=i_n0,
+    )
+
+    psi_sys = np.asarray(i_s0, dtype=complex)
+    vacuum = states.wg_ground(d_bin)
+
+    system_states = [psi_sys.copy()]
+    loop_field_states = [vacuum.copy()]
+    output_field_states = [vacuum.copy()]
+    input_field_states = [vacuum.copy()]
+    correlation_bins = [vacuum.copy()]
+
+    schmidt = [np.array([1.0])]
+    bond_dims = [1]
+    schmidt_tau = [np.array([1.0])]
+    bond_dims_tau = [1]
+
+    # Chain ordering is [emitted/output history | active delay window | system].
+    # At step k, the active delay window starts at index k and has long_steps
+    # sites. The system tensor is always kept at the last site.
+    chain = [vacuum.copy() for _ in range(long_steps)]
+    chain.append(psi_sys.copy())
+
+    short_offset = long_steps - short_steps
+    last_output_center = None
+
+    for step in range(n_steps):
+        H_step = ham(step) if ham_is_callable else None
+
+        long_index = step
+        short_index = step + short_offset
+        system_index = step + long_steps
+
+        # Move the short-delay bin next to the system, then move the long-delay
+        # bin immediately to its left. This gives the active block
+        # [long_delay | short_delay | system].
+        _move_site_right(chain, short_index, system_index - 1, strategy)
+        _move_site_right(chain, long_index, system_index - 2, strategy)
+
+        input_bin = np.asarray(next(input_field), dtype=complex)
+        theta = pair_tensor(chain[system_index], input_bin)
+        system_left, input_bin_oc = split_pair_right(theta, strategy)
+        input_field_states.append(_observable_copy(input_bin_oc))
+
+        long_bin = chain[system_index - 2]
+        short_bin = chain[system_index - 1]
+
+        if ham_is_callable:
+            theta = contract_cached(
+                "aib,bjc,ckd,dle->aijkle",
+                long_bin,
+                short_bin,
+                system_left,
+                input_bin_oc,
+            )
+            theta = apply_u_evol(H_step, theta)
+        else:
+            theta = contract_cached(
+                "aijklb,pqrsijkl->apqrsb",
+                contract_cached(
+                    "aib,bjc,ckd,dle->aijkle",
+                    long_bin,
+                    short_bin,
+                    system_left,
+                    input_bin_oc,
+                ),
+                static_gate,
+            )
+
+        # Split [long | short | system | current].
+        theta = theta.reshape(
+            theta.shape[0],
+            d_bin,
+            d_bin * d_sys * d_bin,
+            theta.shape[-1],
+        )
+        long_out, rest = split_pair_right(theta, strategy)
+
+        theta = rest.reshape(rest.shape[0], d_bin, d_sys * d_bin, rest.shape[-1])
+        short_cont, rest = split_pair_right(theta, strategy)
+
+        theta = rest.reshape(rest.shape[0], d_sys, d_bin, rest.shape[-1])
+        system_centered, current_bin = split_pair_left(theta, strategy)
+        system_states.append(_observable_copy(system_centered))
+
+        theta = swap_pair_tensor(system_centered, current_bin)
+        current_centered, system_next = split_pair_left(theta, strategy)
+
+        # Replace the active block, then restore chronological order:
+        # [old long output, shifted delay window with updated short bin,
+        #  newly emitted current bin, system].
+        chain[system_index - 2] = long_out
+        chain[system_index - 1] = short_cont
+        chain[system_index] = current_centered
+        chain.append(system_next)
+
+        _move_site_left(chain, system_index - 2, step, strategy)
+        _move_site_left(chain, system_index - 1, step + short_offset, strategy)
+        chain = _canonicalized_tensor_list(
+            chain,
+            center=step + long_steps + 1,
+            strategy=strategy,
+        )
+
+        output_tensor = chain[step]
+        current_tensor = chain[step + long_steps]
+        system_tensor = chain[step + long_steps + 1]
+
+        output_field_states.append(_observable_copy(output_tensor))
+        loop_field_states.append(_observable_copy(current_tensor))
+        correlation_bins.append(_observable_copy(output_tensor))
+        last_output_center = _observable_copy(output_tensor)
+
+        theta = pair_tensor(current_tensor, system_tensor)
+        schmidt.append(_pair_schmidt_coefficients(theta, params.bond_max))
+        bond_dims.append(int(current_tensor.shape[2]))
+
+        if long_steps > 1:
+            theta = pair_tensor(output_tensor, chain[step + 1])
+            schmidt_tau.append(_pair_schmidt_coefficients(theta, params.bond_max))
+            bond_dims_tau.append(int(output_tensor.shape[2]))
+        else:
+            schmidt_tau.append(np.array([1.0]))
+            bond_dims_tau.append(1)
+
+        chain[step + long_steps + 1] = np.asarray(system_tensor, copy=True)
+
+    if n_steps > 0 and last_output_center is not None:
+        correlation_bins[-1] = last_output_center
 
     return Bins(
         system_states=system_states,

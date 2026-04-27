@@ -32,7 +32,9 @@ __all__ = [
     "hamiltonian_2tls_mar",
     "hamiltonian_2tls_nmar",
     "hamiltonian_1tls_giant_open_nmar",
+    "hamiltonian_1tls_giant_open_2delay_nmar",
     "hamiltonian_1nho_giant_open_nmar",
+    "hamiltonian_1nho_giant_chiral_2delay_nmar",
     "hamiltonian_1tls_cavity_nmar",
     "Hamiltonian",
 ]
@@ -85,6 +87,33 @@ def _resolve_single_channel_coupling(
         return float(gamma_primary)
 
     return float(gamma_fallback)
+
+
+def _resolve_three_leg_couplings(
+    gamma_total: float,
+    gamma0: float | None,
+    gamma1: float | None,
+    gamma2: float | None,
+) -> tuple[float, float, float]:
+    """
+    Resolve three coupling-point strengths.
+
+    The fallback splits the supplied total coupling equally across the three
+    points. For production scans, pass all three couplings explicitly.
+    """
+    default = float(gamma_total) / 3.0
+    return (
+        float(default if gamma0 is None else gamma0),
+        float(default if gamma1 is None else gamma1),
+        float(default if gamma2 is None else gamma2),
+    )
+
+
+def _kron4(a0: np.ndarray, a1: np.ndarray, a2: np.ndarray, a3: np.ndarray) -> np.ndarray:
+    """
+    Kronecker product for the four-site order used by two-delay gates.
+    """
+    return np.kron(np.kron(np.kron(a0, a1), a2), a3)
 
 
 def hamiltonian_1tls(
@@ -773,6 +802,116 @@ def hamiltonian_1tls_giant_open_nmar(
     return hm_total
 
 
+def hamiltonian_1tls_giant_open_2delay_nmar(
+    params: InputParams,
+    omega: float | np.ndarray = 0,
+    delta: float = 0,
+    phase_short: float | None = None,
+    phase_long: float | None = None,
+    gamma0_l: float | None = None,
+    gamma0_r: float | None = None,
+    gamma1_l: float | None = None,
+    gamma1_r: float | None = None,
+    gamma2_l: float | None = None,
+    gamma2_r: float | None = None,
+) -> Hamiltonian:
+    """
+    One giant TLS with three coupling points in one open waveguide.
+
+    Hilbert-space ordering:
+        [long_delay_bin] ⊗ [short_delay_bin] ⊗ [TLS] ⊗ [current_bin]
+
+    The current coupling point acts on ``current_bin``. The middle coupling
+    point acts on ``short_delay_bin`` with ``phase_short``. The far coupling
+    point acts on ``long_delay_bin`` with ``phase_long``. Each time bin contains
+    two propagation channels, so ``params.d_t_total`` should be
+    ``[d_left, d_right]``.
+
+    Returns H * delta_t, matching the convention used by ``u_evol`` and
+    ``apply_u_evol``.
+    """
+    delta_t = params.delta_t
+    phase_short = params.phase if phase_short is None else float(phase_short)
+    phase_long = 2.0 * phase_short if phase_long is None else float(phase_long)
+
+    d_sys_total = np.asarray(params.d_sys_total, dtype=int)
+    d_t_total = np.asarray(params.d_t_total, dtype=int)
+
+    if int(np.prod(d_sys_total)) != 2:
+        raise ValueError(
+            "hamiltonian_1tls_giant_open_2delay_nmar expects a single TLS "
+            "system block (prod(d_sys_total) == 2)."
+        )
+
+    if d_t_total.size != 2:
+        raise ValueError(
+            "hamiltonian_1tls_giant_open_2delay_nmar expects a two-channel "
+            "time bin (len(d_t_total) == 2)."
+        )
+
+    gamma0_l, gamma1_l, gamma2_l = _resolve_three_leg_couplings(
+        params.gamma_l,
+        gamma0_l,
+        gamma1_l,
+        gamma2_l,
+    )
+    gamma0_r, gamma1_r, gamma2_r = _resolve_three_leg_couplings(
+        params.gamma_r,
+        gamma0_r,
+        gamma1_r,
+        gamma2_r,
+    )
+
+    d_t = int(np.prod(d_t_total))
+    I_t = np.eye(d_t, dtype=complex)
+
+    sp = sigma_plus()
+    sm = sigma_minus()
+    pe = proj_excited(2)
+
+    aL = a_l(d_t_total)
+    aR = a_r(d_t_total)
+    adagL = a_dag_l(d_t_total)
+    adagR = a_dag_r(d_t_total)
+
+    H_leg0 = np.sqrt(gamma0_l / delta_t) * (
+        _kron4(I_t, I_t, sm, adagL) + _kron4(I_t, I_t, sp, aL)
+    ) + np.sqrt(gamma0_r / delta_t) * (
+        _kron4(I_t, I_t, sm, adagR) + _kron4(I_t, I_t, sp, aR)
+    )
+
+    H_leg1 = np.sqrt(gamma1_l / delta_t) * (
+        _kron4(I_t, adagL * np.exp(1j * phase_short), sm, I_t)
+        + _kron4(I_t, aL * np.exp(-1j * phase_short), sp, I_t)
+    ) + np.sqrt(gamma1_r / delta_t) * (
+        _kron4(I_t, adagR * np.exp(1j * phase_short), sm, I_t)
+        + _kron4(I_t, aR * np.exp(-1j * phase_short), sp, I_t)
+    )
+
+    H_leg2 = np.sqrt(gamma2_l / delta_t) * (
+        _kron4(adagL * np.exp(1j * phase_long), I_t, sm, I_t)
+        + _kron4(aL * np.exp(-1j * phase_long), I_t, sp, I_t)
+    ) + np.sqrt(gamma2_r / delta_t) * (
+        _kron4(adagR * np.exp(1j * phase_long), I_t, sm, I_t)
+        + _kron4(aR * np.exp(-1j * phase_long), I_t, sp, I_t)
+    )
+
+    if isinstance(omega, np.ndarray):
+        omega = np.asarray(omega, dtype=float)
+
+        def hm_total(t_k: int) -> np.ndarray:
+            Hs = delta * pe + 0.5 * omega[t_k] * (sp + sm)
+            H_sys = _kron4(I_t, I_t, Hs, I_t)
+            return (H_sys + H_leg0 + H_leg1 + H_leg2) * delta_t
+
+    else:
+        Hs = delta * pe + 0.5 * float(omega) * (sp + sm)
+        H_sys = _kron4(I_t, I_t, Hs, I_t)
+        hm_total = (H_sys + H_leg0 + H_leg1 + H_leg2) * delta_t
+
+    return hm_total
+
+
 def hamiltonian_1nho_giant_open_nmar(
     params: InputParams,
     omega: float | np.ndarray = 0,
@@ -863,6 +1002,115 @@ def hamiltonian_1nho_giant_open_nmar(
             + 0.5 * float(omega) * (osc_adag + osc_a)
         )
         hm_total = (np.kron(np.kron(I_t, Hs), I_t) + H_leg1 + H_leg2) * delta_t
+
+    return hm_total
+
+
+def hamiltonian_1nho_giant_chiral_2delay_nmar(
+    params: InputParams,
+    omega: float | np.ndarray = 0,
+    delta: float = 0,
+    U: float | None = None,
+    phase_short: float | None = None,
+    phase_long: float | None = None,
+    gamma0: float | None = None,
+    gamma1: float | None = None,
+    gamma2: float | None = None,
+) -> Hamiltonian:
+    """
+    One giant Kerr resonator with three coupling points in one chiral waveguide.
+
+    Hilbert-space ordering:
+        [long_delay_bin] ⊗ [short_delay_bin] ⊗ [resonator] ⊗ [current_bin]
+
+    Each time bin is a single bosonic propagation channel, so
+    ``params.d_t_total`` should be ``[d_bin]``. The current coupling point acts
+    on ``current_bin``. The middle and far coupling points act on
+    ``short_delay_bin`` and ``long_delay_bin`` with propagation phases
+    ``phase_short`` and ``phase_long``.
+
+    The resonator system term matches ``hamiltonian_1nho``:
+
+        delta * n + (U / 2) * n * (n - 1)
+        + (omega / 2) * (a + a_dag)
+
+    Returns H * delta_t, matching the convention used by ``u_evol`` and
+    ``apply_u_evol``.
+    """
+    delta_t = params.delta_t
+    U = params.U if U is None else float(U)
+    phase_short = params.phase if phase_short is None else float(phase_short)
+    phase_long = 2.0 * phase_short if phase_long is None else float(phase_long)
+
+    d_sys_total = np.asarray(params.d_sys_total, dtype=int)
+    d_t_total = np.asarray(params.d_t_total, dtype=int)
+
+    if d_t_total.size != 1:
+        raise ValueError(
+            "hamiltonian_1nho_giant_chiral_2delay_nmar expects a single-channel "
+            "time bin (len(d_t_total) == 1)."
+        )
+
+    gamma_total = _resolve_single_channel_coupling(
+        params.gamma_r,
+        params.gamma_l,
+        None,
+    )
+    gamma0, gamma1, gamma2 = _resolve_three_leg_couplings(
+        gamma_total,
+        gamma0,
+        gamma1,
+        gamma2,
+    )
+
+    d_sys = int(np.prod(d_sys_total))
+    d_t = int(np.prod(d_t_total))
+
+    I_sys = np.eye(d_sys, dtype=complex)
+    I_t = np.eye(d_t, dtype=complex)
+
+    osc_a = a(d_sys)
+    osc_adag = a_dag(d_sys)
+    osc_n = num_op(d_sys)
+
+    a_bin = a(d_t)
+    adag_bin = a_dag(d_t)
+
+    H_leg0 = np.sqrt(gamma0 / delta_t) * (
+        _kron4(I_t, I_t, osc_adag, a_bin)
+        + _kron4(I_t, I_t, osc_a, adag_bin)
+    )
+
+    H_leg1 = np.sqrt(gamma1 / delta_t) * (
+        _kron4(I_t, adag_bin * np.exp(1j * phase_short), osc_a, I_t)
+        + _kron4(I_t, a_bin * np.exp(-1j * phase_short), osc_adag, I_t)
+    )
+
+    H_leg2 = np.sqrt(gamma2 / delta_t) * (
+        _kron4(adag_bin * np.exp(1j * phase_long), I_t, osc_a, I_t)
+        + _kron4(a_bin * np.exp(-1j * phase_long), I_t, osc_adag, I_t)
+    )
+
+    if isinstance(omega, np.ndarray):
+        omega = np.asarray(omega, dtype=float)
+
+        def hm_total(t_k: int) -> np.ndarray:
+            Hs = (
+                delta * osc_n
+                + 0.5 * U * (osc_n @ (osc_n - I_sys))
+                + 0.5 * omega[t_k] * (osc_adag + osc_a)
+            )
+            H_sys = _kron4(I_t, I_t, Hs, I_t)
+            return (H_sys + H_leg0 + H_leg1 + H_leg2) * delta_t
+
+    else:
+        Hs = (
+            delta * osc_n
+            + 0.5 * U * (osc_n @ (osc_n - I_sys))
+            + 0.5 * float(omega) * (osc_adag + osc_a)
+        )
+        H_sys = _kron4(I_t, I_t, Hs, I_t)
+        hm_total = (H_sys + H_leg0 + H_leg1 + H_leg2) * delta_t
 
     return hm_total
 
