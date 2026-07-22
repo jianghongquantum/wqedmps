@@ -24,14 +24,14 @@ physical setting:
 
 - Markovian evolutions store system, input, and emitted-output snapshots
 - delayed-feedback evolutions additionally store the loop-field snapshots and
-  two Schmidt histories: one across the active system/loop cut and one across
-  the delay-line cut used while swapping the feedback bin back
+  two Schmidt histories: one across the final field/system cut and one across
+  the emitted-history/delay-line cut
 """
 
 import math
 import numpy as np
 
-from seemps.state import CanonicalMPS
+from seemps.state import CanonicalMPS, NO_TRUNCATION
 
 from wqedmps import states as states
 from wqedmps.hamiltonians import Hamiltonian
@@ -44,7 +44,6 @@ from wqedmps.mps_tools import (
     strategy_from_params,
     swap_pair_tensor,
 )
-from wqedmps.operators import *
 from wqedmps.operators import apply_u_evol, u_evol
 from wqedmps.parameters import Bins, InputParams
 
@@ -69,11 +68,7 @@ def _observable_copy(tensor: np.ndarray) -> np.ndarray:
     snapshot = tensor.copy()
     norm_sq = float(np.vdot(snapshot, snapshot).real)
     if norm_sq > 0.0:
-        norm = math.sqrt(norm_sq)
-        # Match the default scalar tolerance of np.isclose(norm, 1.0) without
-        # the overhead of the full array-oriented helper.
-        if abs(norm - 1.0) > 1.0e-5 + 1.0e-8:
-            snapshot /= norm
+        snapshot /= math.sqrt(norm_sq)
     return snapshot
 
 
@@ -102,6 +97,60 @@ def _pair_schmidt_coefficients(
     matrix = theta.reshape(left_bond * d_left, d_right * right_bond)
     singular_values = np.linalg.svd(matrix, compute_uv=False)
     return _normalized_schmidt_coefficients(singular_values, max_bond)
+
+
+def _centered_site_from_right_environment(
+    psi: CanonicalMPS,
+    site: int,
+    max_bond: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Center one site and obtain Schmidt coefficients from its right environment.
+
+    ``psi`` must have its orthogonality center to the right of ``site``.  The
+    block through ``site`` is then left-isometric.  Factoring the contracted
+    right environment produces a standalone centered tensor for local
+    observables, while its eigenvalues are the squared Schmidt coefficients
+    across ``[0:site+1] | [site+1:]``.
+    """
+    rho_right = np.asarray(psi.right_environment(int(site)), dtype=complex)
+    rho_right = 0.5 * (rho_right + rho_right.conj().T)
+    weights, eigenvectors = np.linalg.eigh(rho_right)
+    order = np.argsort(weights)[::-1]
+    singular_values = np.sqrt(np.maximum(weights[order], 0.0))
+    right_factor = eigenvectors[:, order] * singular_values[None, :]
+    centered_tensor = np.tensordot(
+        np.asarray(psi[int(site)]),
+        right_factor,
+        axes=(2, 0),
+    )
+    return centered_tensor, _normalized_schmidt_coefficients(
+        singular_values,
+        max_bond,
+    )
+
+
+def _centered_site_from_left_environment(
+    psi: CanonicalMPS,
+    site: int,
+    max_bond: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Center one site from the left environment of a right-canonical suffix."""
+    rho_left = np.asarray(psi.left_environment(int(site)), dtype=complex)
+    rho_left = 0.5 * (rho_left + rho_left.conj().T)
+    weights, eigenvectors = np.linalg.eigh(rho_left)
+    order = np.argsort(weights)[::-1]
+    singular_values = np.sqrt(np.maximum(weights[order], 0.0))
+    left_factor = singular_values[:, None] * eigenvectors[:, order].conj().T
+    centered_tensor = np.tensordot(
+        left_factor,
+        np.asarray(psi[int(site)]),
+        axes=(1, 0),
+    )
+    return centered_tensor, _normalized_schmidt_coefficients(
+        singular_values,
+        max_bond,
+    )
 
 
 def _move_site_right(
@@ -152,13 +201,15 @@ def _canonicalized_tensor_list(
 
     The two-delay evolution performs many nonlocal swaps. Re-centering the
     chain keeps one-site observables and subsequent local SVDs in a controlled
-    gauge.
+    gauge. This is only a gauge move: the time-evolution splits have already
+    applied ``strategy``, so canonicalization must not truncate the state a
+    second time.
     """
     psi = CanonicalMPS(
         tensors,
         center=int(center),
         normalize=False,
-        strategy=strategy,
+        strategy=NO_TRUNCATION,
     )
     return [np.asarray(psi[i], dtype=complex) for i in range(len(psi))]
 
@@ -220,7 +271,6 @@ def t_evol_mar_seemps(
 
     schmidt = [np.array([1.0])]
     bond_dims = [1]
-    last_correlation_centered = None
 
     for step in range(n_steps):
         H_step = ham(step) if ham_is_callable else None
@@ -234,7 +284,7 @@ def t_evol_mar_seemps(
             normalize=False,
             strategy=strategy,
         )
-        input_field_states.append(psi[1])
+        input_field_states.append(_observable_copy(psi[1]))
 
         # Step 2. Apply the local gate on the active pair. After the update the
         # right tensor is the interacting field bin, which becomes output.
@@ -244,13 +294,16 @@ def t_evol_mar_seemps(
         else:
             theta = contract_cached("pqij,aijb->apqb", static_gate, theta)
         psi.update_2site_right(theta, site=0, strategy=strategy)
-        output_field_states.append(psi[1])
+        output_field_states.append(_observable_copy(psi[1]))
 
         # Step 3. Swap to [output | updated_system]. This restores the gauge
         # where the system tensor is the object propagated to the next step,
         # while the left tensor is kept for correlation functions.
         theta = swap_pair_tensor(psi[0], psi[1])
         psi.update_2site_right(theta, site=0, strategy=strategy)
+        propagated_norm = float(np.linalg.norm(psi[1]))
+        if propagated_norm > 0.0:
+            psi[1] = psi[1] / propagated_norm
         schmidt_vals = _pair_schmidt_coefficients(
             pair_tensor(psi[0], psi[1]),
             psi[0].shape[2],
@@ -259,13 +312,13 @@ def t_evol_mar_seemps(
         schmidt.append(schmidt_vals)
         bond_dims.append(int(psi[0].shape[2]))
         psi_sys = psi[1]
-        system_states.append(psi[1])
+        system_states.append(_observable_copy(psi[1]))
 
     # Finalize: replace the last correlation entry by the last emitted-bin
     # tensor so the trailing edge of the output chain is stored consistently.
     if n_steps > 0:
-        psi.recenter(0)
-        correlation_bins[-1] = psi[0]
+        psi.recenter(0, strategy=NO_TRUNCATION)
+        correlation_bins[-1] = _observable_copy(psi[0])
 
     return Bins(
         system_states=system_states,
@@ -363,6 +416,15 @@ def t_evol_mar(
             schmidt_vals,
         ) = split_pair_both(swap_pair_tensor(i_s, output_bin), strategy)
 
+        # Truncation changes only the global scale of the retained state. Keep
+        # the actual propagated center normalized, and apply the same scalar to
+        # the equivalent left-centered representation used at the final output
+        # boundary.
+        propagated_norm = float(np.linalg.norm(system_tensor))
+        if propagated_norm > 0.0:
+            system_tensor = system_tensor / propagated_norm
+            last_correlation_centered = last_correlation_centered / propagated_norm
+
         # Step 4. Record Schmidt and bond-dimension data across the active cut.
         schmidt.append(_normalized_schmidt_coefficients(schmidt_vals, params.bond_max))
         bond_dims.append(int(correlation_tensor.shape[2]))
@@ -376,7 +438,7 @@ def t_evol_mar(
     # Finalize: replace the last correlation entry by the last emitted-bin
     # tensor so the trailing edge of the output chain is stored consistently.
     if n_steps > 0 and last_correlation_centered is not None:
-        correlation_bins[-1] = last_correlation_centered
+        correlation_bins[-1] = _observable_copy(last_correlation_centered)
 
     return Bins(
         system_states=system_states,
@@ -417,8 +479,8 @@ def t_evol_nmar_seemps(
     -------
     ``Bins`` containing system snapshots, loop-field snapshots, emitted output
     snapshots, input snapshots, correlation tensors, and two Schmidt histories:
-    one for the active feedback-loop cut and one for the swap-back cut inside
-    the delay line.
+    one for the final field/system cut and one for the emitted-history/delay-line
+    cut.
     """
 
     delta_t = params.delta_t
@@ -508,29 +570,22 @@ def t_evol_nmar_seemps(
         # time step.
         theta = rest_oc.reshape(rest_oc.shape[0], d_sys, d_bin, rest_oc.shape[-1])
         system_tensor_centered, loop_bin = split_pair_left(theta, strategy)
-        system_states.append(_observable_copy(system_tensor_centered))
         theta = swap_pair_tensor(system_tensor_centered, loop_bin)
         loop_bin_centered, system_tensor = split_pair_left(theta, strategy)
 
-        # Step 6. Reattach the loop bin to the feedback branch. This is the cut
-        # whose Schmidt data represents the active system-loop entanglement.
+        # Step 6. Reattach the loop bin to the feedback branch before restoring
+        # chronological order.
         theta = pair_tensor(feedback_left, loop_bin_centered)
         (
             feedback_bin_centered,
             loop_internal,
-            feedback_left_mid,
-            loop_bin_oc,
-            schmidt_vals,
+            _,
+            _,
+            _,
         ) = split_pair_both(theta, strategy)
-        loop_field_states.append(_observable_copy(loop_bin_oc))
-
-        # Record Schmidt data across the active feedback|loop cut.
-        schmidt.append(_normalized_schmidt_coefficients(schmidt_vals, params.bond_max))
-        bond_dims.append(int(feedback_left_mid.shape[2]))
 
         # Step 7. Store the emitted feedback snapshot and write the updated
         # branch back into the delay line.
-        output_field_states.append(_observable_copy(feedback_bin_centered))
         delay_line[step + delay_steps - 1] = feedback_bin_centered
         delay_line.append(loop_internal)
 
@@ -554,16 +609,58 @@ def t_evol_nmar_seemps(
                 theta = swap_pair_tensor(delay_line[j - 1], current_feedback)
                 current_feedback, delay_line[j] = split_pair_left(theta, strategy)
 
-        # Record Schmidt data across the cut used while swapping the feedback
-        # bin back through the delay line.
-        schmidt_tau.append(
-            _normalized_schmidt_coefficients(tau_singular_values, params.bond_max)
-        )
-        bond_dims_tau.append(int(current_feedback.shape[2]))
-
+        # The special final split supplies two gauges of the same state. Keep
+        # the propagated right-centered gauge normalized, and apply the same
+        # scalar to the output-centered gauge.
+        propagated_norm = float(np.linalg.norm(delayed_bin))
+        if propagated_norm > 0.0:
+            delayed_bin = delayed_bin / propagated_norm
+            current_feedback = current_feedback / propagated_norm
         delay_line[step + 1] = delayed_bin
         correlation_bins.append(correlation_tensor)
-        last_feedback_center = _observable_copy(current_feedback)
+
+        # The emitted history is already left-isometric and never needs to be
+        # swept again.  The active suffix has its center on the first delayed
+        # bin and is right-isometric thereafter, so its left environments give
+        # the final loop/system snapshots and the field|system Schmidt cut in
+        # O(delay_steps), independent of the emitted-history length.
+        active_tensors = list(delay_line[step + 1 :]) + [system_tensor]
+        active_mps = CanonicalMPS(
+            active_tensors,
+            center=0,
+            normalize=False,
+            strategy=NO_TRUNCATION,
+            is_canonical=True,
+        )
+        system_index = len(active_tensors) - 1
+        current_index = system_index - 1
+        loop_centered, _ = _centered_site_from_left_environment(
+            active_mps,
+            site=current_index,
+            max_bond=params.bond_max,
+        )
+        system_centered, system_schmidt_values = (
+            _centered_site_from_left_environment(
+                active_mps,
+                site=system_index,
+                max_bond=params.bond_max,
+            )
+        )
+        output_centered = _observable_copy(current_feedback)
+
+        system_states.append(_observable_copy(system_centered))
+        output_field_states.append(output_centered)
+        loop_field_states.append(_observable_copy(loop_centered))
+        schmidt.append(system_schmidt_values)
+        bond_dims.append(int(active_tensors[system_index].shape[0]))
+        schmidt_tau.append(
+            _normalized_schmidt_coefficients(
+                tau_singular_values,
+                params.bond_max,
+            )
+        )
+        bond_dims_tau.append(int(correlation_tensor.shape[2]))
+        last_feedback_center = output_centered
 
     # Finalize: replace the last correlation entry by the final emitted-bin
     # tensor so the end of the feedback-output chain is stored consistently.
@@ -695,31 +792,23 @@ def t_evol_nmar(
         # Step 5. Second cut: separate [system | loop].
         theta = rest_oc.reshape(rest_oc.shape[0], d_sys, d_bin, rest_oc.shape[-1])
         system_tensor_centered, loop_bin = split_pair_left(theta, strategy)
-        system_states.append(_observable_copy(system_tensor_centered))
 
         # Step 6. Swap to [loop | system] so the system tensor is ready for the
         # next time step.
         theta = swap_pair_tensor(system_tensor_centered, loop_bin)
         loop_bin_centered, system_tensor = split_pair_left(theta, strategy)
 
-        # Step 7. Reattach the loop bin to the feedback branch, store the
-        # active-cut observables, and write the updated branch back into the
-        # delay line.
+        # Step 7. Reattach the loop bin to the feedback branch and write the
+        # updated branch back into the delay line.
         theta = pair_tensor(feedback_left_new, loop_bin_centered)
         (
             feedback_bin_centered,
             loop_internal,
-            feedback_left_mid,
-            loop_bin_oc,
-            schmidt_vals,
+            _,
+            _,
+            _,
         ) = split_pair_both(theta, strategy)
-        loop_field_states.append(_observable_copy(loop_bin_oc))
 
-        # Record Schmidt data across the active feedback|loop cut.
-        schmidt.append(_normalized_schmidt_coefficients(schmidt_vals, params.bond_max))
-        bond_dims.append(int(feedback_left_mid.shape[2]))
-
-        output_field_states.append(_observable_copy(feedback_bin_centered))
         delay_line[step + delay_steps - 1] = feedback_bin_centered
         delay_line.append(loop_internal)
 
@@ -743,16 +832,50 @@ def t_evol_nmar(
                 theta = swap_pair_tensor(delay_line[j - 1], current_feedback)
                 current_feedback, delay_line[j] = split_pair_left(theta, strategy)
 
-        # Record Schmidt data across the cut used while swapping the feedback
-        # bin back through the delay line.
-        schmidt_tau.append(
-            _normalized_schmidt_coefficients(tau_singular_values, params.bond_max)
-        )
-        bond_dims_tau.append(int(current_feedback.shape[2]))
-
+        propagated_norm = float(np.linalg.norm(delayed_bin))
+        if propagated_norm > 0.0:
+            delayed_bin = delayed_bin / propagated_norm
+            current_feedback = current_feedback / propagated_norm
         delay_line[step + 1] = delayed_bin
         correlation_bins.append(correlation_tensor)
-        last_feedback_center = _observable_copy(current_feedback)
+
+        active_tensors = list(delay_line[step + 1 :]) + [system_tensor]
+        active_mps = CanonicalMPS(
+            active_tensors,
+            center=0,
+            normalize=False,
+            strategy=NO_TRUNCATION,
+            is_canonical=True,
+        )
+        system_index = len(active_tensors) - 1
+        current_index = system_index - 1
+        loop_centered, _ = _centered_site_from_left_environment(
+            active_mps,
+            site=current_index,
+            max_bond=params.bond_max,
+        )
+        system_centered, system_schmidt_values = (
+            _centered_site_from_left_environment(
+                active_mps,
+                site=system_index,
+                max_bond=params.bond_max,
+            )
+        )
+        output_centered = _observable_copy(current_feedback)
+
+        system_states.append(_observable_copy(system_centered))
+        output_field_states.append(output_centered)
+        loop_field_states.append(_observable_copy(loop_centered))
+        schmidt.append(system_schmidt_values)
+        bond_dims.append(int(active_tensors[system_index].shape[0]))
+        schmidt_tau.append(
+            _normalized_schmidt_coefficients(
+                tau_singular_values,
+                params.bond_max,
+            )
+        )
+        bond_dims_tau.append(int(correlation_tensor.shape[2]))
+        last_feedback_center = output_centered
 
         system_tensor = np.asarray(system_tensor, copy=True)
 
@@ -847,8 +970,6 @@ def t_evol_nmar_2delay(
     chain.append(psi_sys.copy())
 
     short_offset = long_steps - short_steps
-    last_output_center = None
-
     for step in range(n_steps):
         H_step = ham(step) if ham_is_callable else None
 
@@ -906,17 +1027,16 @@ def t_evol_nmar_2delay(
 
         theta = rest.reshape(rest.shape[0], d_sys, d_bin, rest.shape[-1])
         system_centered, current_bin = split_pair_left(theta, strategy)
-        system_states.append(_observable_copy(system_centered))
 
         theta = swap_pair_tensor(system_centered, current_bin)
-        current_centered, system_next = split_pair_left(theta, strategy)
+        current_next, system_next = split_pair_left(theta, strategy)
 
         # Replace the active block, then restore chronological order:
         # [old long output, shifted delay window with updated short bin,
         #  newly emitted current bin, system].
         chain[system_index - 2] = long_out
         chain[system_index - 1] = short_cont
-        chain[system_index] = current_centered
+        chain[system_index] = current_next
         chain.append(system_next)
 
         _move_site_left(chain, system_index - 2, step, strategy)
@@ -927,31 +1047,61 @@ def t_evol_nmar_2delay(
             strategy=strategy,
         )
 
-        output_tensor = chain[step]
-        current_tensor = chain[step + long_steps]
-        system_tensor = chain[step + long_steps + 1]
+        current_index = step + long_steps
+        system_index = current_index + 1
+        propagated_norm = float(np.linalg.norm(chain[system_index]))
+        if propagated_norm > 0.0:
+            chain[system_index] = chain[system_index] / propagated_norm
+        system_tensor = chain[system_index]
+        canonical_chain = CanonicalMPS(
+            chain,
+            center=system_index,
+            normalize=False,
+            strategy=strategy,
+            is_canonical=True,
+        )
+        output_centered, tau_schmidt_values = _centered_site_from_right_environment(
+            canonical_chain,
+            site=step,
+            max_bond=params.bond_max,
+        )
+        loop_centered, schmidt_values = _centered_site_from_right_environment(
+            canonical_chain,
+            site=current_index,
+            max_bond=params.bond_max,
+        )
 
-        output_field_states.append(_observable_copy(output_tensor))
-        loop_field_states.append(_observable_copy(current_tensor))
-        correlation_bins.append(_observable_copy(output_tensor))
-        last_output_center = _observable_copy(output_tensor)
+        # Store every observable from the same post-swap, post-truncation MPS.
+        system_states.append(_observable_copy(system_tensor))
+        output_field_states.append(_observable_copy(output_centered))
+        loop_field_states.append(_observable_copy(loop_centered))
 
-        theta = pair_tensor(current_tensor, system_tensor)
-        schmidt.append(_pair_schmidt_coefficients(theta, params.bond_max))
-        bond_dims.append(int(current_tensor.shape[2]))
+        schmidt.append(schmidt_values)
+        bond_dims.append(int(chain[current_index].shape[2]))
+        schmidt_tau.append(tau_schmidt_values)
+        bond_dims_tau.append(int(chain[step].shape[2]))
 
-        if long_steps > 1:
-            theta = pair_tensor(output_tensor, chain[step + 1])
-            schmidt_tau.append(_pair_schmidt_coefficients(theta, params.bond_max))
-            bond_dims_tau.append(int(output_tensor.shape[2]))
-        else:
-            schmidt_tau.append(np.array([1.0]))
-            bond_dims_tau.append(1)
+        chain[system_index] = np.asarray(system_tensor, copy=True)
 
-        chain[step + long_steps + 1] = np.asarray(system_tensor, copy=True)
-
-    if n_steps > 0 and last_output_center is not None:
-        correlation_bins[-1] = last_output_center
+    # Correlation tensors must form one compatible MPS with the orthogonality
+    # center on the final output boundary.  Per-step normalized copies are not
+    # gauge compatible, so construct this prefix once from the final chain.
+    if n_steps > 0:
+        correlation_mps = CanonicalMPS(
+            chain,
+            center=len(chain) - 1,
+            normalize=True,
+            strategy=strategy,
+            is_canonical=True,
+        )
+        # This is a gauge move only.  Avoid introducing a second truncation
+        # after the time-evolution step has already applied ``strategy``.
+        correlation_mps.recenter(n_steps - 1, strategy=NO_TRUNCATION)
+        correlation_mps.normalize_inplace()
+        correlation_bins.extend(
+            np.array(correlation_mps[site], dtype=complex, copy=True)
+            for site in range(n_steps)
+        )
 
     return Bins(
         system_states=system_states,

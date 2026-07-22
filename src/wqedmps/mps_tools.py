@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from functools import lru_cache
 
 import opt_einsum as oe
@@ -7,6 +8,7 @@ import numpy as np
 from scipy.linalg import eigh
 
 from seemps.cython import (
+    Truncation,
     _destructive_svd,
     _select_svd_driver,
     destructively_truncate_vector,
@@ -15,6 +17,10 @@ from seemps.state import DEFAULT_STRATEGY
 from seemps.state.schmidt import _left_orth_2site, _right_orth_2site
 
 from .parameters import InputParams
+
+
+_TOPK_MIN_DIMENSION = 128
+_TOPK_MAX_RETAINED_FRACTION = 0.125
 
 __all__ = [
     "contract_cached",
@@ -185,12 +191,26 @@ def _topk_svd_for_theta(
     if max_bond <= 0:
         return None
 
-    if max_bond >= min_dim or min_dim < 3 * max_bond:
+    # LAPACK's full SVD is faster and more reliable for the small, nearly
+    # square matrices produced by the usual time-bin swap path.  The Gram
+    # top-k route is reserved for genuinely low-rank decompositions.
+    if (
+        max_bond >= min_dim
+        or min_dim < _TOPK_MIN_DIMENSION
+        or max_bond / min_dim > _TOPK_MAX_RETAINED_FRACTION
+    ):
         return None
-    if float(strategy.get_tolerance()) > 1.0e-8:
+    tolerance = float(strategy.get_tolerance())
+    if not np.isfinite(tolerance) or tolerance <= 0.0 or tolerance > 1.0e-8:
+        return None
+    if strategy.get_method() != Truncation.RELATIVE_NORM_SQUARED_ERROR:
+        return None
+    if strategy.get_normalize_flag():
         return None
 
     matrix = theta.reshape(rows, cols)
+    if matrix.dtype not in (np.dtype(np.float64), np.dtype(np.complex128)):
+        return None
     try:
         return _topk_svd(matrix, max_bond, strategy)
     except Exception:
@@ -203,12 +223,22 @@ def _topk_svd(
     strategy,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
     rows, cols = matrix.shape
+    min_dim = min(rows, cols)
+    if max_bond <= 0 or max_bond >= min_dim:
+        return None
+    max_dim = max(rows, cols)
+    solve_dim = min(max_bond + 1, min_dim)
+    tolerance = float(strategy.get_tolerance())
     stable_cutoff = np.sqrt(np.finfo(float).eps)
+    certification_tolerance = max(
+        1.0e-12,
+        100.0 * np.finfo(float).eps * max_dim,
+    )
     if rows <= cols:
         gram = matrix @ matrix.conj().T
         eigvals, U = eigh(
             gram,
-            subset_by_index=[rows - max_bond, rows - 1],
+            subset_by_index=[rows - solve_dim, rows - 1],
             check_finite=False,
             driver="evr",
         )
@@ -217,17 +247,19 @@ def _topk_svd(
         U = U[:, order]
         s = np.sqrt(np.maximum(eigvals, 0.0))
         if (
-            s.size == 0
+            s.size < max_bond
             or not np.isfinite(s[0])
-            or s[-1] <= stable_cutoff * s[0]
+            or s[max_bond - 1] <= stable_cutoff * s[0]
         ):
             return None
-        Vh = (U.conj().T @ matrix) / s[:, None]
+        U = U[:, :max_bond]
+        s_kept = s[:max_bond]
+        Vh = (U.conj().T @ matrix) / s_kept[:, None]
     else:
         gram = matrix.conj().T @ matrix
         eigvals, V = eigh(
             gram,
-            subset_by_index=[cols - max_bond, cols - 1],
+            subset_by_index=[cols - solve_dim, cols - 1],
             check_finite=False,
             driver="evr",
         )
@@ -236,19 +268,55 @@ def _topk_svd(
         V = V[:, order]
         s = np.sqrt(np.maximum(eigvals, 0.0))
         if (
-            s.size == 0
+            s.size < max_bond
             or not np.isfinite(s[0])
-            or s[-1] <= stable_cutoff * s[0]
+            or s[max_bond - 1] <= stable_cutoff * s[0]
         ):
             return None
-        U = (matrix @ V) / s[None, :]
+        V = V[:, :max_bond]
+        s_kept = s[:max_bond]
+        U = (matrix @ V) / s_kept[None, :]
         Vh = V.conj().T
 
-    destructively_truncate_vector(s, strategy)
-    D = int(s.shape[0])
-    if D == 0:
+    # A nearly degenerate truncation boundary is sensitive to the squared
+    # condition number of the Gram matrix.  Use the full SVD in that case.
+    if solve_dim > max_bond:
+        relative_gap_sq = (s[max_bond - 1] ** 2 - s[max_bond] ** 2) / s[0] ** 2
+        gap_tolerance = max(
+            1.0e-8,
+            100.0 * np.finfo(float).eps * max_dim,
+        )
+        if relative_gap_sq <= gap_tolerance:
+            return None
+
+    # Top-k values alone cannot reproduce a tolerance-driven truncation unless
+    # the omitted tail already exceeds the allowed error.  Requiring even the
+    # first omitted singular value to exceed the full error budget is a
+    # conservative proof that the bond cap is binding.
+    matrix_norm_sq = float(np.vdot(matrix, matrix).real)
+    if not np.isfinite(matrix_norm_sq) or matrix_norm_sq <= 0.0:
         return None
-    return U[:, :D], s, Vh[:D, :]
+    truncation_budget = matrix_norm_sq * tolerance
+    numerical_slack = 100.0 * np.finfo(float).eps * max_dim * matrix_norm_sq
+    if s[max_bond] ** 2 <= truncation_budget + numerical_slack:
+        return None
+
+    identity = np.eye(max_bond, dtype=matrix.dtype)
+    orthogonality_error = max(
+        float(np.linalg.norm(U.conj().T @ U - identity, ord="fro")),
+        float(np.linalg.norm(Vh @ Vh.conj().T - identity, ord="fro")),
+    )
+    left_residual = matrix @ Vh.conj().T - U * s_kept[None, :]
+    right_residual = U.conj().T @ matrix - s_kept[:, None] * Vh
+    matrix_norm = max(math.sqrt(matrix_norm_sq), np.finfo(float).tiny)
+    residual_error = max(
+        float(np.linalg.norm(left_residual, ord="fro")) / matrix_norm,
+        float(np.linalg.norm(right_residual, ord="fro")) / matrix_norm,
+    )
+    if max(orthogonality_error, residual_error) > certification_tolerance:
+        return None
+
+    return U, s_kept, Vh
 
 
 def strategy_from_params(params: InputParams):

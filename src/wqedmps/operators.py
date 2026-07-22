@@ -275,7 +275,10 @@ def u_evol(
 ) -> np.ndarray:
     """
     Generalized evolution gate:
-        U = exp(-i H delta_t)
+        U = exp(-i H_step)
+
+    ``H_step`` is the dimensionless one-step Hamiltonian returned by this
+    package's Hamiltonian builders, which already include ``delta_t``.
 
     For interacting_timebins_num = 1, output shape is
         (d_sys, d_t, d_sys, d_t)
@@ -295,7 +298,7 @@ def apply_u_evol(
     H: np.ndarray,
     theta: np.ndarray,
     sparse_density_threshold: float = 0.15,
-    min_expm_multiply_dim: int = 64,
+    min_expm_multiply_dim: int = 128,
 ) -> np.ndarray:
     """
     Apply ``exp(-1j * H)`` directly to the physical axes of a local tensor.
@@ -370,9 +373,11 @@ def expectation_2bins(bin_state: np.ndarray, mpo: np.ndarray) -> complex:
     Expectation value of a two-site operator acting on a two-bin tensor.
 
     bin_state is assumed to already contain two physical sites grouped together.
+    The operator axes follow the dense-matrix reshape convention
+    ``(bra_site_1, bra_site_2, ket_site_1, ket_site_2)``.
     """
     return contract_cached(
-        "aikb,jlik,ajlb->",
+        "aikb,ikjl,ajlb->",
         np.conj(bin_state),
         mpo,
         bin_state,
@@ -382,6 +387,9 @@ def expectation_2bins(bin_state: np.ndarray, mpo: np.ndarray) -> complex:
 def expectation_nbins(ket: np.ndarray, mpo: np.ndarray) -> complex:
     """
     General expectation value for an operator acting on multiple grouped bins.
+
+    The operator axes follow the dense-matrix reshape convention: all bra
+    physical axes first, followed by all ket physical axes.
 
     This function caches the einsum subscript string for the current operator rank
     to avoid rebuilding the same index structure repeatedly.
@@ -404,7 +412,7 @@ def expectation_nbins(ket: np.ndarray, mpo: np.ndarray) -> complex:
         ket_phys = labels[ket_rank : ket_rank + ket_rank - 2]
 
         bra_sub = left_bond + bra_phys + right_bond
-        mpo_sub = ket_phys + bra_phys
+        mpo_sub = bra_phys + ket_phys
         ket_sub = left_bond + ket_phys + right_bond
         expectation_nbins._einsum_subscripts = f"{bra_sub},{mpo_sub},{ket_sub}->"
 
@@ -442,7 +450,7 @@ def single_time_expectation(normalized_bins: list[np.ndarray], ops_list) -> np.n
     extracted from a generic MPS unless they are known to be valid normalized
     local objects.
     """
-    is_list = isinstance(ops_list, (list, tuple))
+    is_list = op_list_check(ops_list)
     if not is_list:
         ops_list = [ops_list]
 
@@ -472,20 +480,21 @@ def loop_integrated_statistics(
     This is useful in feedback / delay-loop problems where one is interested in
     the total quantity stored in the loop over the last tau.
 
-    If delay_steps = l, then each point contains the cumulative contribution
-    over roughly the previous l time steps.
+    If ``delay_steps`` is the window length, each point contains the cumulative
+    contribution over roughly that many previous time steps. For array-valued
+    data the first axis is treated as time.
     """
     values = np.asarray(time_dependent_func, dtype=complex)
-    l = params.delay_steps
+    if values.ndim == 0:
+        raise ValueError("time_dependent_func must have a time axis")
+    delay_steps = params.delay_steps
 
-    out = np.zeros_like(values, dtype=complex)
-    csum = np.cumsum(values)
-
-    if l == 0:
+    if delay_steps == 0:
         return values * params.delta_t
 
-    out[: l + 1] = csum[: l + 1]
-    out[l:] = csum[l:] - csum[:-l]
+    out = np.cumsum(values, axis=0)
+    if delay_steps < values.shape[0]:
+        out[delay_steps:] -= out[:-delay_steps].copy()
 
     return out * params.delta_t
 

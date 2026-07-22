@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
-import numpy as np
 from typing import Callable, TypeAlias
+
+import numpy as np
 
 from wqedmps.operators import (
     sigma_plus,
@@ -40,6 +41,80 @@ __all__ = [
 ]
 
 
+def _validated_real_scalar(
+    value: float,
+    name: str,
+    *,
+    nonnegative: bool = False,
+) -> float:
+    """Convert a finite real scalar without accepting complex or bool values."""
+    array = np.asarray(value)
+    if array.ndim != 0 or array.dtype.kind in {"b", "c"}:
+        raise ValueError(f"{name} must be a finite real scalar")
+    try:
+        result = float(array)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite real scalar") from exc
+    if not np.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    if nonnegative and result < 0.0:
+        raise ValueError(f"{name} must be non-negative")
+    return result
+
+
+def _validated_drive(
+    omega: float | np.ndarray,
+    params: InputParams,
+    name: str = "omega",
+) -> float | np.ndarray:
+    """Return a finite real scalar or a sufficiently long one-dimensional drive."""
+    array = np.asarray(omega)
+    if array.ndim == 0:
+        return _validated_real_scalar(omega, name)
+    if array.ndim != 1:
+        raise ValueError(f"{name} drive array must be one-dimensional")
+    if array.dtype.kind in {"b", "c"}:
+        raise ValueError(f"{name} must contain finite real values")
+    try:
+        array = np.asarray(array, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must contain finite real values") from exc
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain finite real values")
+    if array.size < params.steps:
+        raise ValueError(
+            f"{name} drive array has length {array.size}, but at least "
+            f"{params.steps} values are required"
+        )
+    return array
+
+
+def _require_channel_count(
+    d_t_total: np.ndarray,
+    expected: int,
+    model: str,
+) -> None:
+    if np.asarray(d_t_total).size != expected:
+        channel_description = "single-channel" if expected == 1 else "two-channel"
+        raise ValueError(
+            f"{model} expects a {channel_description} time bin "
+            f"(len(d_t_total) == {expected})."
+        )
+
+
+def _require_single_tls(d_sys_total: np.ndarray, model: str) -> None:
+    if int(np.prod(d_sys_total)) != 2:
+        raise ValueError(
+            f"{model} expects a single TLS system block "
+            "(prod(d_sys_total) == 2)."
+        )
+
+
+def _require_two_tls(d_sys_total: np.ndarray, model: str) -> None:
+    if not np.array_equal(np.asarray(d_sys_total, dtype=int), np.array([2, 2])):
+        raise ValueError(f"{model} expects d_sys_total = [2, 2].")
+
+
 def _resolve_two_leg_couplings(
     gamma_primary: float,
     gamma_secondary: float,
@@ -53,19 +128,19 @@ def _resolve_two_leg_couplings(
     (gamma_primary, gamma_secondary). Otherwise split gamma_primary equally
     between the two legs, matching the user-supplied fallback convention.
     """
-    if gamma1 is not None and gamma2 is not None:
-        return float(gamma1), float(gamma2)
-
-    if abs(gamma_secondary) > 0:
-        default1 = gamma_primary
-        default2 = gamma_secondary
-    else:
-        default1 = 0.5 * gamma_primary
-        default2 = 0.5 * gamma_primary
+    if gamma1 is None or gamma2 is None:
+        if abs(gamma_secondary) > 0:
+            default1 = gamma_primary
+            default2 = gamma_secondary
+        else:
+            default1 = 0.5 * gamma_primary
+            default2 = 0.5 * gamma_primary
+        gamma1 = default1 if gamma1 is None else gamma1
+        gamma2 = default2 if gamma2 is None else gamma2
 
     return (
-        float(default1 if gamma1 is None else gamma1),
-        float(default2 if gamma2 is None else gamma2),
+        _validated_real_scalar(gamma1, "gamma1", nonnegative=True),
+        _validated_real_scalar(gamma2, "gamma2", nonnegative=True),
     )
 
 
@@ -80,13 +155,9 @@ def _resolve_single_channel_coupling(
     By default use the "current-bin" coupling, falling back to the other
     coupling if the primary one is zero.
     """
-    if gamma is not None:
-        return float(gamma)
-
-    if abs(gamma_primary) > 0:
-        return float(gamma_primary)
-
-    return float(gamma_fallback)
+    if gamma is None:
+        gamma = gamma_primary if abs(gamma_primary) > 0 else gamma_fallback
+    return _validated_real_scalar(gamma, "gamma", nonnegative=True)
 
 
 def _resolve_three_leg_couplings(
@@ -101,11 +172,27 @@ def _resolve_three_leg_couplings(
     The fallback splits the supplied total coupling equally across the three
     points. For production scans, pass all three couplings explicitly.
     """
-    default = float(gamma_total) / 3.0
+    default = _validated_real_scalar(
+        gamma_total,
+        "gamma_total",
+        nonnegative=True,
+    ) / 3.0
     return (
-        float(default if gamma0 is None else gamma0),
-        float(default if gamma1 is None else gamma1),
-        float(default if gamma2 is None else gamma2),
+        _validated_real_scalar(
+            default if gamma0 is None else gamma0,
+            "gamma0",
+            nonnegative=True,
+        ),
+        _validated_real_scalar(
+            default if gamma1 is None else gamma1,
+            "gamma1",
+            nonnegative=True,
+        ),
+        _validated_real_scalar(
+            default if gamma2 is None else gamma2,
+            "gamma2",
+            nonnegative=True,
+        ),
     )
 
 
@@ -128,6 +215,10 @@ def hamiltonian_1tls(
     delta_t = params.delta_t
     d_t_total = np.asarray(params.d_t_total, dtype=int)
     d_sys_total = np.asarray(params.d_sys_total, dtype=int)
+    _require_single_tls(d_sys_total, "hamiltonian_1tls")
+    _require_channel_count(d_t_total, 2, "hamiltonian_1tls")
+    omega = _validated_drive(omega, params)
+    delta = _validated_real_scalar(delta, "delta")
 
     gamma_l = params.gamma_l
     gamma_r = params.gamma_r
@@ -148,8 +239,6 @@ def hamiltonian_1tls(
     )
 
     if isinstance(omega, np.ndarray):
-        omega = np.asarray(omega, dtype=float)
-
         def hm_total(t_k: int) -> np.ndarray:
             H_sys = np.kron(delta * pe + 0.5 * omega[t_k] * (sp + sm), I_t)
             return (H_sys + H_int_l + H_int_r) * delta_t
@@ -182,18 +271,10 @@ def hamiltonian_1tls_single_channel(
     delta_t = params.delta_t
     d_t_total = np.asarray(params.d_t_total, dtype=int)
     d_sys_total = np.asarray(params.d_sys_total, dtype=int)
-
-    if d_t_total.size != 1:
-        raise ValueError(
-            "hamiltonian_1tls_single_channel expects a single-channel bin "
-            "(len(d_t_total) == 1)."
-        )
-
-    if int(np.prod(d_sys_total)) != 2:
-        raise ValueError(
-            "hamiltonian_1tls_single_channel expects a single TLS system block "
-            "(prod(d_sys_total) == 2)."
-        )
+    _require_channel_count(d_t_total, 1, "hamiltonian_1tls_single_channel")
+    _require_single_tls(d_sys_total, "hamiltonian_1tls_single_channel")
+    omega = _validated_drive(omega, params)
+    delta = _validated_real_scalar(delta, "delta")
 
     gamma = _resolve_single_channel_coupling(params.gamma_r, params.gamma_l, gamma)
 
@@ -212,8 +293,6 @@ def hamiltonian_1tls_single_channel(
     )
 
     if isinstance(omega, np.ndarray):
-        omega = np.asarray(omega, dtype=float)
-
         def hm_total(t_k: int) -> np.ndarray:
             H_sys = np.kron(delta * pe + 0.5 * omega[t_k] * (sp + sm), I_t)
             return (H_sys + H_now) * delta_t
@@ -244,6 +323,10 @@ def hamiltonian_1tls_feedback(
     delta_t = params.delta_t
     d_t_total = np.asarray(params.d_t_total, dtype=int)
     d_sys_total = np.asarray(params.d_sys_total, dtype=int)
+    _require_channel_count(d_t_total, 1, "hamiltonian_1tls_feedback")
+    _require_single_tls(d_sys_total, "hamiltonian_1tls_feedback")
+    omega = _validated_drive(omega, params)
+    delta = _validated_real_scalar(delta, "delta")
 
     gamma_l = params.gamma_l
     gamma_r = params.gamma_r
@@ -272,8 +355,6 @@ def hamiltonian_1tls_feedback(
     )
 
     if isinstance(omega, np.ndarray):
-        omega = np.asarray(omega, dtype=float)
-
         def hm_total(t_k: int) -> np.ndarray:
             H_sys = np.kron(
                 np.kron(I_t, delta * pe + 0.5 * omega[t_k] * (sp + sm)),
@@ -320,8 +401,11 @@ def hamiltonian_1nho_single_channel(
             "(len(d_t_total) == 1)."
         )
 
+    omega = _validated_drive(omega, params)
+
     gamma = _resolve_single_channel_coupling(params.gamma_r, params.gamma_l, gamma)
-    U = params.U if U is None else float(U)
+    delta = _validated_real_scalar(delta, "delta")
+    U = _validated_real_scalar(params.U if U is None else U, "U")
 
     d_sys = int(np.prod(d_sys_total))
     d_t = int(np.prod(d_t_total))
@@ -340,8 +424,6 @@ def hamiltonian_1nho_single_channel(
     )
 
     if isinstance(omega, np.ndarray):
-        omega = np.asarray(omega, dtype=float)
-
         def hm_total(t_k: int) -> np.ndarray:
             H_sys = np.kron(
                 delta * osc_n
@@ -376,10 +458,13 @@ def hamiltonian_1nho(
     delta_t = params.delta_t
     d_t_total = np.asarray(params.d_t_total, dtype=int)
     d_sys_total = np.asarray(params.d_sys_total, dtype=int)
+    _require_channel_count(d_t_total, 2, "hamiltonian_1nho")
+    omega = _validated_drive(omega, params)
 
     gamma_l = params.gamma_l
     gamma_r = params.gamma_r
-    U = params.U if U is None else float(U)
+    delta = _validated_real_scalar(delta, "delta")
+    U = _validated_real_scalar(params.U if U is None else U, "U")
 
     d_sys = int(np.prod(d_sys_total))
     d_t = int(np.prod(d_t_total))
@@ -398,8 +483,6 @@ def hamiltonian_1nho(
     )
 
     if isinstance(omega, np.ndarray):
-        omega = np.asarray(omega, dtype=float)
-
         def hm_total(t_k: int) -> np.ndarray:
             H_sys = np.kron(
                 delta * osc_n
@@ -438,11 +521,14 @@ def hamiltonian_1nho_feedback(
     delta_t = params.delta_t
     d_t_total = np.asarray(params.d_t_total, dtype=int)
     d_sys_total = np.asarray(params.d_sys_total, dtype=int)
+    _require_channel_count(d_t_total, 1, "hamiltonian_1nho_feedback")
+    omega = _validated_drive(omega, params)
 
     gamma_l = params.gamma_l
     gamma_r = params.gamma_r
     phase = params.phase
-    U = params.U if U is None else float(U)
+    delta = _validated_real_scalar(delta, "delta")
+    U = _validated_real_scalar(params.U if U is None else U, "U")
 
     d_sys = int(np.prod(d_sys_total))
     d_t = int(np.prod(d_t_total))
@@ -466,8 +552,6 @@ def hamiltonian_1nho_feedback(
     )
 
     if isinstance(omega, np.ndarray):
-        omega = np.asarray(omega, dtype=float)
-
         def hm_total(t_k: int) -> np.ndarray:
             H_sys = np.kron(
                 np.kron(
@@ -517,6 +601,12 @@ def hamiltonian_2tls_mar(
 
     d_sys_total = np.asarray(params.d_sys_total, dtype=int)
     d_t_total = np.asarray(params.d_t_total, dtype=int)
+    _require_two_tls(d_sys_total, "hamiltonian_2tls_mar")
+    _require_channel_count(d_t_total, 2, "hamiltonian_2tls_mar")
+    omega1 = _validated_drive(omega1, params, "omega1")
+    omega2 = _validated_drive(omega2, params, "omega2")
+    delta1 = _validated_real_scalar(delta1, "delta1")
+    delta2 = _validated_real_scalar(delta2, "delta2")
 
     d1 = int(d_sys_total[0])
     d2 = int(d_sys_total[1])
@@ -550,9 +640,6 @@ def hamiltonian_2tls_mar(
     )
 
     if isinstance(omega1, np.ndarray) and isinstance(omega2, np.ndarray):
-        omega1 = np.asarray(omega1, dtype=float)
-        omega2 = np.asarray(omega2, dtype=float)
-
         def hm_total(t_k: int) -> np.ndarray:
             Hs = (
                 delta1 * e1
@@ -565,7 +652,6 @@ def hamiltonian_2tls_mar(
             ) * delta_t
 
     elif isinstance(omega1, np.ndarray):
-        omega1 = np.asarray(omega1, dtype=float)
         w2 = float(omega2)
 
         def hm_total(t_k: int) -> np.ndarray:
@@ -578,7 +664,6 @@ def hamiltonian_2tls_mar(
             return (np.kron(Hs, I_t) + H_1r + H_1l + H_2r + H_2l) * delta_t
 
     elif isinstance(omega2, np.ndarray):
-        omega2 = np.asarray(omega2, dtype=float)
         w1 = float(omega1)
 
         def hm_total(t_k: int) -> np.ndarray:
@@ -628,6 +713,12 @@ def hamiltonian_2tls_nmar(
 
     d_sys_total = np.asarray(params.d_sys_total, dtype=int)
     d_t_total = np.asarray(params.d_t_total, dtype=int)
+    _require_two_tls(d_sys_total, "hamiltonian_2tls_nmar")
+    _require_channel_count(d_t_total, 1, "hamiltonian_2tls_nmar")
+    omega1 = _validated_drive(omega1, params, "omega1")
+    omega2 = _validated_drive(omega2, params, "omega2")
+    delta1 = _validated_real_scalar(delta1, "delta1")
+    delta2 = _validated_real_scalar(delta2, "delta2")
 
     d1 = int(d_sys_total[0])
     d2 = int(d_sys_total[1])
@@ -664,9 +755,6 @@ def hamiltonian_2tls_nmar(
     )
 
     if isinstance(omega1, np.ndarray) and isinstance(omega2, np.ndarray):
-        omega1 = np.asarray(omega1, dtype=float)
-        omega2 = np.asarray(omega2, dtype=float)
-
         def hm_total(t_k: int) -> np.ndarray:
             Hs = (
                 delta1 * e1
@@ -679,7 +767,6 @@ def hamiltonian_2tls_nmar(
             ) * delta_t
 
     elif isinstance(omega1, np.ndarray):
-        omega1 = np.asarray(omega1, dtype=float)
         w2 = float(omega2)
 
         def hm_total(t_k: int) -> np.ndarray:
@@ -692,7 +779,6 @@ def hamiltonian_2tls_nmar(
             return (np.kron(np.kron(I_t, Hs), I_t) + H_11 + H_21 + H_12 + H_22) * delta_t
 
     elif isinstance(omega2, np.ndarray):
-        omega2 = np.asarray(omega2, dtype=float)
         w1 = float(omega1)
 
         def hm_total(t_k: int) -> np.ndarray:
@@ -736,8 +822,10 @@ def hamiltonian_1tls_giant_open_nmar(
     Each time bin contains two propagation channels, so
     `params.d_t_total` should be `[d_left, d_right]`.
 
-    The first coupling point acts on the current bin and the second coupling
-    point acts on the delayed bin with propagation phase `params.phase`.
+    ``gamma1_l/r`` label the current-bin leg and ``gamma2_l/r`` label the
+    delayed-bin leg with propagation phase ``params.phase``. In a spatial
+    left-to-right point convention, directional couplings must be mapped onto
+    these encounter-order legs explicitly.
     Returns H * delta_t.
     """
     delta_t = params.delta_t
@@ -745,12 +833,10 @@ def hamiltonian_1tls_giant_open_nmar(
 
     d_sys_total = np.asarray(params.d_sys_total, dtype=int)
     d_t_total = np.asarray(params.d_t_total, dtype=int)
-
-    if int(np.prod(d_sys_total)) != 2:
-        raise ValueError(
-            "hamiltonian_1tls_giant_open_nmar expects a single TLS system block "
-            "(prod(d_sys_total) == 2)."
-        )
+    _require_single_tls(d_sys_total, "hamiltonian_1tls_giant_open_nmar")
+    _require_channel_count(d_t_total, 2, "hamiltonian_1tls_giant_open_nmar")
+    omega = _validated_drive(omega, params)
+    delta = _validated_real_scalar(delta, "delta")
 
     gamma1_l, gamma2_l = _resolve_two_leg_couplings(
         params.gamma_l,
@@ -789,8 +875,6 @@ def hamiltonian_1tls_giant_open_nmar(
     )
 
     if isinstance(omega, np.ndarray):
-        omega = np.asarray(omega, dtype=float)
-
         def hm_total(t_k: int) -> np.ndarray:
             Hs = delta * pe + 0.5 * omega[t_k] * (sp + sm)
             return (np.kron(np.kron(I_t, Hs), I_t) + H_leg1 + H_leg2) * delta_t
@@ -827,27 +911,34 @@ def hamiltonian_1tls_giant_open_2delay_nmar(
     two propagation channels, so ``params.d_t_total`` should be
     ``[d_left, d_right]``.
 
+    The three ``gamma`` indices follow this current/short/long encounter order.
+    A single composite ``short_delay_bin`` represents a bidirectional spatial
+    three-point geometry only when the two adjacent propagation delays are
+    equal; arbitrary unequal spacings require separate directional delay bins.
+
     Returns H * delta_t, matching the convention used by ``u_evol`` and
     ``apply_u_evol``.
     """
     delta_t = params.delta_t
-    phase_short = params.phase if phase_short is None else float(phase_short)
-    phase_long = 2.0 * phase_short if phase_long is None else float(phase_long)
+    phase_short = _validated_real_scalar(
+        params.phase if phase_short is None else phase_short,
+        "phase_short",
+    )
+    phase_long = _validated_real_scalar(
+        2.0 * phase_short if phase_long is None else phase_long,
+        "phase_long",
+    )
 
     d_sys_total = np.asarray(params.d_sys_total, dtype=int)
     d_t_total = np.asarray(params.d_t_total, dtype=int)
-
-    if int(np.prod(d_sys_total)) != 2:
-        raise ValueError(
-            "hamiltonian_1tls_giant_open_2delay_nmar expects a single TLS "
-            "system block (prod(d_sys_total) == 2)."
-        )
-
-    if d_t_total.size != 2:
-        raise ValueError(
-            "hamiltonian_1tls_giant_open_2delay_nmar expects a two-channel "
-            "time bin (len(d_t_total) == 2)."
-        )
+    _require_single_tls(d_sys_total, "hamiltonian_1tls_giant_open_2delay_nmar")
+    _require_channel_count(
+        d_t_total,
+        2,
+        "hamiltonian_1tls_giant_open_2delay_nmar",
+    )
+    omega = _validated_drive(omega, params)
+    delta = _validated_real_scalar(delta, "delta")
 
     gamma0_l, gamma1_l, gamma2_l = _resolve_three_leg_couplings(
         params.gamma_l,
@@ -897,8 +988,6 @@ def hamiltonian_1tls_giant_open_2delay_nmar(
     )
 
     if isinstance(omega, np.ndarray):
-        omega = np.asarray(omega, dtype=float)
-
         def hm_total(t_k: int) -> np.ndarray:
             Hs = delta * pe + 0.5 * omega[t_k] * (sp + sm)
             H_sys = _kron4(I_t, I_t, Hs, I_t)
@@ -931,8 +1020,10 @@ def hamiltonian_1nho_giant_open_nmar(
     Each time bin contains two propagation channels, so
     `params.d_t_total` should be `[d_left, d_right]`.
 
-    The first coupling point acts on the current bin and the second coupling
-    point acts on the delayed bin with propagation phase `params.phase`.
+    ``gamma1_l/r`` label the current-bin leg and ``gamma2_l/r`` label the
+    delayed-bin leg with propagation phase ``params.phase``. In a spatial
+    left-to-right point convention, directional couplings must be mapped onto
+    these encounter-order legs explicitly.
     The resonator system term matches `hamiltonian_1nho`; setting `U = 0`
     gives the linear-resonator limit.
 
@@ -940,10 +1031,13 @@ def hamiltonian_1nho_giant_open_nmar(
     """
     delta_t = params.delta_t
     phase = params.phase
-    U = params.U if U is None else float(U)
+    U = _validated_real_scalar(params.U if U is None else U, "U")
 
     d_sys_total = np.asarray(params.d_sys_total, dtype=int)
     d_t_total = np.asarray(params.d_t_total, dtype=int)
+    _require_channel_count(d_t_total, 2, "hamiltonian_1nho_giant_open_nmar")
+    omega = _validated_drive(omega, params)
+    delta = _validated_real_scalar(delta, "delta")
 
     gamma1_l, gamma2_l = _resolve_two_leg_couplings(
         params.gamma_l,
@@ -985,8 +1079,6 @@ def hamiltonian_1nho_giant_open_nmar(
     )
 
     if isinstance(omega, np.ndarray):
-        omega = np.asarray(omega, dtype=float)
-
         def hm_total(t_k: int) -> np.ndarray:
             Hs = (
                 delta * osc_n
@@ -1038,9 +1130,16 @@ def hamiltonian_1nho_giant_chiral_2delay_nmar(
     ``apply_u_evol``.
     """
     delta_t = params.delta_t
-    U = params.U if U is None else float(U)
-    phase_short = params.phase if phase_short is None else float(phase_short)
-    phase_long = 2.0 * phase_short if phase_long is None else float(phase_long)
+    delta = _validated_real_scalar(delta, "delta")
+    U = _validated_real_scalar(params.U if U is None else U, "U")
+    phase_short = _validated_real_scalar(
+        params.phase if phase_short is None else phase_short,
+        "phase_short",
+    )
+    phase_long = _validated_real_scalar(
+        2.0 * phase_short if phase_long is None else phase_long,
+        "phase_long",
+    )
 
     d_sys_total = np.asarray(params.d_sys_total, dtype=int)
     d_t_total = np.asarray(params.d_t_total, dtype=int)
@@ -1050,6 +1149,8 @@ def hamiltonian_1nho_giant_chiral_2delay_nmar(
             "hamiltonian_1nho_giant_chiral_2delay_nmar expects a single-channel "
             "time bin (len(d_t_total) == 1)."
         )
+
+    omega = _validated_drive(omega, params)
 
     gamma_total = _resolve_single_channel_coupling(
         params.gamma_r,
@@ -1092,8 +1193,6 @@ def hamiltonian_1nho_giant_chiral_2delay_nmar(
     )
 
     if isinstance(omega, np.ndarray):
-        omega = np.asarray(omega, dtype=float)
-
         def hm_total(t_k: int) -> np.ndarray:
             Hs = (
                 delta * osc_n
@@ -1140,7 +1239,9 @@ def hamiltonian_1tls_cavity_nmar(
     phase = params.phase
     gamma_l = params.gamma_l
     gamma_r = params.gamma_r
-    g = params.g if g is None else float(g)
+    g = _validated_real_scalar(params.g if g is None else g, "g")
+    delta_atom = _validated_real_scalar(delta_atom, "delta_atom")
+    delta_cavity = _validated_real_scalar(delta_cavity, "delta_cavity")
 
     d_sys_total = np.asarray(params.d_sys_total, dtype=int)
     d_t_total = np.asarray(params.d_t_total, dtype=int)
@@ -1149,6 +1250,9 @@ def hamiltonian_1tls_cavity_nmar(
         raise ValueError(
             "hamiltonian_1tls_cavity_nmar expects d_sys_total = [2, d_cavity]."
         )
+
+    _require_channel_count(d_t_total, 1, "hamiltonian_1tls_cavity_nmar")
+    omega = _validated_drive(omega, params)
 
     d_tls = 2
     d_cavity = int(d_sys_total[1])
@@ -1179,8 +1283,6 @@ def hamiltonian_1tls_cavity_nmar(
     )
 
     if isinstance(omega, np.ndarray):
-        omega = np.asarray(omega, dtype=float)
-
         def hm_total(t_k: int) -> np.ndarray:
             Hs = (
                 delta_atom * pe

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Parameter and output containers for waveguide-QED simulations.
 
@@ -18,13 +16,16 @@ This module defines:
    by the simulation routines.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
+
 import numpy as np
 
 __all__ = ["InputParams", "Bins"]
 
 
-def _as_1d_int_array(values) -> np.ndarray:
+def _as_1d_int_array(values, name: str) -> np.ndarray:
     """
     Convert the given input into a 1D integer numpy array.
 
@@ -39,15 +40,46 @@ def _as_1d_int_array(values) -> np.ndarray:
     ValueError
         If the array is empty or contains values smaller than 1.
     """
-    arr = np.asarray(values, dtype=int).reshape(-1)
+    raw = np.asarray(values)
+    if raw.dtype.kind in {"b", "c"}:
+        raise ValueError(f"{name} must contain integers")
 
-    if arr.size == 0:
+    try:
+        numeric = np.asarray(values, dtype=float).reshape(-1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must contain integers") from exc
+
+    if numeric.size == 0:
         raise ValueError("dimension arrays must be non-empty")
 
-    if np.any(arr < 1):
+    if not np.all(np.isfinite(numeric)):
+        raise ValueError(f"{name} must contain finite integers")
+
+    rounded = np.rint(numeric)
+    if not np.array_equal(numeric, rounded):
+        raise ValueError(f"{name} must contain integers")
+
+    if np.any(rounded < 1):
         raise ValueError("all local dimensions must be >= 1")
 
-    return arr
+    if np.any(rounded > np.iinfo(np.intp).max):
+        raise ValueError(f"{name} contains an integer that is too large")
+
+    return rounded.astype(int)
+
+
+def _as_finite_float(value, name: str) -> float:
+    """Convert one real scalar to float and reject NaN/Inf/complex values."""
+    raw = np.asarray(value)
+    if raw.ndim != 0 or raw.dtype.kind in {"b", "c"}:
+        raise ValueError(f"{name} must be a finite real scalar")
+    try:
+        converted = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite real scalar") from exc
+    if not np.isfinite(converted):
+        raise ValueError(f"{name} must be finite")
+    return converted
 
 
 @dataclass(slots=True)
@@ -61,7 +93,8 @@ class InputParams:
         Time step of the discretized evolution.
 
     tmax : float
-        Total simulation time.
+        Total simulation time. The number of simulated bins is obtained by
+        rounding ``tmax / delta_t`` to the nearest integer.
 
     d_sys_total : ndarray
         Local dimensions of the full emitter/system Hilbert space.
@@ -82,7 +115,7 @@ class InputParams:
         Maximum allowed MPS bond dimension during truncation.
 
     gamma_l, gamma_r : float
-        Coupling strengths of the system to the left/right channel.
+        Non-negative coupling strengths of the system to the left/right channel.
 
     gamma_l2, gamma_r2 : float
         Additional left/right couplings, used in geometries with multiple
@@ -97,7 +130,8 @@ class InputParams:
         Hamiltonians.
 
     tau : float
-        Delay time.
+        Non-negative delay time. The delay-bin count is obtained by rounding
+        ``tau / delta_t`` to the nearest integer.
 
     phase : float
         Propagation phase accumulated across the delay line.
@@ -133,22 +167,28 @@ class InputParams:
         - scalar inputs are already cast to the expected numeric type
         - common invalid values are rejected early
         """
-        self.d_sys_total = _as_1d_int_array(self.d_sys_total)
-        self.d_t_total = _as_1d_int_array(self.d_t_total)
+        self.d_sys_total = _as_1d_int_array(self.d_sys_total, "d_sys_total")
+        self.d_t_total = _as_1d_int_array(self.d_t_total, "d_t_total")
 
-        self.delta_t = float(self.delta_t)
-        self.tmax = float(self.tmax)
-        self.bond_max = int(self.bond_max)
+        self.delta_t = _as_finite_float(self.delta_t, "delta_t")
+        self.tmax = _as_finite_float(self.tmax, "tmax")
+        bond_max = _as_finite_float(self.bond_max, "bond_max")
+        if bond_max != round(bond_max):
+            raise ValueError("bond_max must be an integer")
+        if bond_max < 1:
+            raise ValueError("bond_max must be >= 1")
+        self.bond_max = int(round(bond_max))
 
-        self.gamma_l = float(self.gamma_l)
-        self.gamma_r = float(self.gamma_r)
-        self.gamma_l2 = float(self.gamma_l2)
-        self.gamma_r2 = float(self.gamma_r2)
-        self.g = float(self.g)
-        self.U = float(self.U)
+        self.gamma_l = _as_finite_float(self.gamma_l, "gamma_l")
+        self.gamma_r = _as_finite_float(self.gamma_r, "gamma_r")
+        self.gamma_l2 = _as_finite_float(self.gamma_l2, "gamma_l2")
+        self.gamma_r2 = _as_finite_float(self.gamma_r2, "gamma_r2")
+        self.g = _as_finite_float(self.g, "g")
+        self.U = _as_finite_float(self.U, "U")
 
-        self.tau = float(self.tau)
-        self.phase = float(self.phase)
+        self.tau = _as_finite_float(self.tau, "tau")
+        self.phase = _as_finite_float(self.phase, "phase")
+        self.atol = _as_finite_float(self.atol, "atol")
         self.svd_driver = str(self.svd_driver).lower()
 
         if self.delta_t <= 0:
@@ -157,11 +197,15 @@ class InputParams:
         if self.tmax < 0:
             raise ValueError("tmax must be non-negative")
 
-        if self.bond_max < 1:
-            raise ValueError("bond_max must be >= 1")
-
         if self.tau < 0:
             raise ValueError("tau must be >= 0")
+
+        for name in ("gamma_l", "gamma_r", "gamma_l2", "gamma_r2"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be non-negative")
+
+        if self.atol < 0:
+            raise ValueError("atol must be non-negative")
 
         if self.svd_driver not in {"gesdd", "gesvd"}:
             raise ValueError("svd_driver must be either 'gesdd' or 'gesvd'")

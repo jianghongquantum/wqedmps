@@ -1,5 +1,6 @@
 from __future__ import annotations
 from collections.abc import Iterator, Sequence
+import math
 import numpy as np
 import scipy as sci
 
@@ -158,10 +159,10 @@ def vacuum(time_length: float, params: InputParams) -> list[np.ndarray]:
     d_t_total = params.d_t_total
 
     bond0 = 1
-    l = int(round(time_length / delta_t, 0))
+    bin_count = int(round(time_length / delta_t, 0))
     d_t = np.prod(d_t_total)
 
-    return [wg_ground(d_t, bond0) for i in range(l)]
+    return [wg_ground(d_t, bond0) for _ in range(bin_count)]
 
 
 def input_state_generator(
@@ -175,17 +176,76 @@ def input_state_generator(
     if input_bins is None:
         prepared_bins: list[np.ndarray] = []
     elif isinstance(input_bins, np.ndarray):
-        prepared_bins = [np.asarray(input_bins, dtype=complex)]
+        input_array = np.asarray(input_bins, dtype=complex)
+        if input_array.ndim == 3:
+            prepared_bins = [input_array]
+        elif input_array.ndim == 4:
+            prepared_bins = [input_array[index] for index in range(input_array.shape[0])]
+        else:
+            raise ValueError(
+                "input_bins ndarray must be one rank-3 MPS tensor or a "
+                "rank-4 stack of MPS tensors"
+            )
     else:
         prepared_bins = [np.asarray(tensor, dtype=complex) for tensor in input_bins]
 
-    for tensor in prepared_bins:
-        yield tensor
+    for index, tensor in enumerate(prepared_bins):
+        if tensor.ndim != 3:
+            raise ValueError(f"input bin {index} must be a rank-3 MPS tensor")
+        if tensor.shape[1] != d_t:
+            raise ValueError(
+                f"input bin {index} has physical dimension {tensor.shape[1]}, "
+                f"expected {d_t}"
+            )
+        if index > 0 and prepared_bins[index - 1].shape[2] != tensor.shape[0]:
+            raise ValueError(
+                f"input bins {index - 1} and {index} have incompatible bond "
+                "dimensions"
+            )
 
-    filler = wg_ground(d_t) if default_state is None else default_state
+    if default_state is None:
+        bond_value = np.asarray(bond0)
+        if bond_value.ndim != 0 or bond_value.dtype.kind in {"b", "c"}:
+            raise ValueError("bond0 must be a positive integer")
+        try:
+            bond_as_float = float(bond_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("bond0 must be a positive integer") from exc
+        if (
+            not np.isfinite(bond_as_float)
+            or bond_as_float != round(bond_as_float)
+            or bond_as_float < 1
+        ):
+            raise ValueError("bond0 must be a positive integer")
+        bond0 = int(round(bond_as_float))
+
+        # Repeating a vacuum bin must transmit, rather than sum over, the
+        # virtual index when a non-scalar bond is explicitly requested.
+        filler = np.zeros((bond0, d_t, bond0), dtype=complex)
+        filler[:, 0, :] = np.eye(bond0)
+    else:
+        filler = np.asarray(default_state, dtype=complex)
+
+    if filler.ndim != 3 or filler.shape[1] != d_t:
+        raise ValueError(
+            f"default_state must be a rank-3 MPS tensor with physical dimension {d_t}"
+        )
+    if filler.shape[0] != filler.shape[2]:
+        raise ValueError(
+            "default_state must have equal left and right bond dimensions "
+            "because it is repeated"
+        )
+    if prepared_bins and prepared_bins[-1].shape[2] != filler.shape[0]:
+        raise ValueError(
+            "the final prepared input bin and default_state have incompatible "
+            "bond dimensions"
+        )
+
+    for tensor in prepared_bins:
+        yield tensor.copy()
 
     while True:
-        yield filler
+        yield filler.copy()
 
 
 # ============================================================
@@ -288,7 +348,15 @@ def normalize_pulse_envelope(delta_t: float, pulse_env: np.ndarray) -> np.ndarra
 
     ensuring the pulse contains one photon.
     """
+    delta_t = float(delta_t)
+    if not np.isfinite(delta_t) or delta_t <= 0.0:
+        raise ValueError("delta_t must be finite and positive")
+
     pulse_env = np.asarray(pulse_env, dtype=complex).copy()
+    if pulse_env.ndim != 1 or pulse_env.size == 0:
+        raise ValueError("pulse envelope must be a non-empty one-dimensional array")
+    if not np.all(np.isfinite(pulse_env)):
+        raise ValueError("pulse envelope must contain only finite values")
 
     norm = np.sum(np.abs(pulse_env) ** 2) * delta_t
 
@@ -332,6 +400,9 @@ def fock_pulse(
         MPS representation of the pulse.
     """
 
+    if not isinstance(direction, str) or direction.upper() not in {"L", "R"}:
+        raise ValueError("direction must be 'L' or 'R'")
+
     if direction.upper() == "L" or len(params.d_t_total) == 1:
         return _fock_pulse(
             pulse_env,
@@ -354,7 +425,7 @@ def fock_pulse(
             bond0,
         )
 
-    raise ValueError("direction must be 'L' or 'R'")
+    raise AssertionError("unreachable direction branch")
 
 
 # ============================================================
@@ -380,42 +451,76 @@ def _fock_pulse(
     """
 
     delta_t = params.delta_t
-    d_t_total = params.d_t_total
+    d_t_total = np.asarray(params.d_t_total, dtype=int)
     strategy = strategy_from_params(params)
 
     m = int(round(pulse_time / delta_t))
+    if m < 1:
+        raise ValueError("pulse_time must contain at least one time bin")
 
     d_bin = int(np.prod(d_t_total))
-    d_local = int(d_t_total[0])
-
     channels = min(len(d_t_total), 2)
 
-    # indices of truncated photon subspace
-    indices_untruncated = [np.arange(0, d_bin, d_local), np.arange(0, d_local)]
-    indices_untruncated = indices_untruncated[-channels:]
+    photon_nums = [int(photon_num_l), int(photon_num_r)][:channels]
+    if photon_nums != [photon_num_l, photon_num_r][:channels]:
+        raise ValueError("photon numbers must be integers")
+    if any(n < 0 for n in photon_nums):
+        raise ValueError("photon numbers must be non-negative")
+    if sum(n > 0 for n in photon_nums) > 1:
+        raise ValueError("at most one propagation channel can contain a Fock pulse")
+    for channel, (n, dimension) in enumerate(zip(photon_nums, d_t_total)):
+        if n >= dimension:
+            raise ValueError(
+                f"photon number {n} requires local dimension >= {n + 1} "
+                f"for channel {channel}"
+            )
 
-    photon_nums = [photon_num_l, photon_num_r]
-    photon_dims = [photon_num_l + 1, photon_num_r + 1]
+    # Flat physical indices for |n_L> tensor-product |n_R>.  The stride is
+    # channel dependent when the left/right local dimensions are unequal.
+    strides = [int(np.prod(d_t_total[ch + 1 :])) for ch in range(channels)]
+    photon_dims = [n + 1 for n in photon_nums]
+    indices = [
+        np.arange(photon_dims[ch], dtype=int) * strides[ch] for ch in range(channels)
+    ]
 
-    indices = [idx[: photon_dims[i]] for i, idx in enumerate(indices_untruncated)]
+    # The auxiliary index counts photons, rather than inheriting either
+    # channel's local Hilbert-space dimension.
+    d_aux = max(photon_nums, default=0) + 1
+    dt_indices = [np.arange(photon_dims[i]) for i in range(channels)]
 
-    dt_indices = [np.arange(d_local)[: photon_dims[i]] for i in range(channels)]
+    pulse_envs = [pulse_env_l, pulse_env_r][:channels]
 
-    pulse_envs = [pulse_env_l, pulse_env_r]
+    if sum(photon_nums) == 0:
+        return [wg_ground(d_bin, bond0) for _ in range(m)]
 
     for i in range(channels):
         if pulse_envs[i] is None:
-            pulse_envs[i] = np.ones(m)
+            pulse_envs[i] = np.ones(m, dtype=complex)
+        else:
+            pulse_envs[i] = np.asarray(pulse_envs[i], dtype=complex)
 
-        pulse_envs[i] = normalize_pulse_envelope(delta_t, np.asarray(pulse_envs[i]))
-
+        # Normalize the envelope actually represented by these m bins.  If a
+        # longer input is truncated, normalizing it first would leave the MPS
+        # with a norm below one.
         pulse_envs[i] = np.pad(pulse_envs[i], (0, max(0, m - len(pulse_envs[i]))))[:m]
+        pulse_envs[i] = normalize_pulse_envelope(delta_t, pulse_envs[i])
 
-    pulse_envs = list(zip(pulse_envs[0], pulse_envs[1]))
+    pulse_envs = list(zip(*pulse_envs))
+
+    if m <= 2:
+        return _short_fock_pulse(
+            pulse_envs,
+            photon_nums,
+            indices,
+            d_bin,
+            delta_t,
+            strategy,
+            bond0,
+        )
 
     # first and last tensors
-    a1 = np.zeros((bond0, d_bin, d_local), dtype=complex)
-    am = np.zeros((d_local, d_bin, bond0), dtype=complex)
+    a1 = np.zeros((bond0, d_bin, d_aux), dtype=complex)
+    am = np.zeros((d_aux, d_bin, bond0), dtype=complex)
 
     for ch in range(channels):
         a1[:, indices[ch], dt_indices[ch]] = np.sqrt(photon_nums[ch]) * pulse_envs[0][
@@ -435,7 +540,7 @@ def _fock_pulse(
         )
 
     def calc_ak(pulse_env_k):
-        ak = np.zeros((d_local, d_bin, d_local), dtype=complex)
+        ak = np.zeros((d_aux, d_bin, d_aux), dtype=complex)
 
         for ch in range(channels):
             for i in range(photon_dims[ch]):
@@ -481,4 +586,75 @@ def _fock_pulse(
 
     tensors.reverse()
 
+    photon_factor = delta_t ** (sum(photon_nums) / 2.0)
+    photon_factor /= math.sqrt(
+        math.prod(math.factorial(photon_num) for photon_num in photon_nums)
+    )
+    tensors[0] *= photon_factor
+
+    return _normalize_open_mps(tensors)
+
+
+def _short_fock_pulse(
+    pulse_envs,
+    photon_nums,
+    indices,
+    d_bin,
+    delta_t,
+    strategy,
+    bond0,
+) -> list[np.ndarray]:
+    """Construct the one- and two-bin boundary cases exactly."""
+    m = len(pulse_envs)
+    if m == 1:
+        physical_index = sum(index[n] for index, n in zip(indices, photon_nums))
+        amplitude = np.prod(
+            [
+                (np.sqrt(delta_t) * pulse_envs[0][ch]) ** n
+                for ch, n in enumerate(photon_nums)
+            ]
+        )
+        tensor = np.zeros((bond0, d_bin, bond0), dtype=complex)
+        tensor[:, physical_index, :] = amplitude
+        return _normalize_open_mps([tensor])
+
+    theta = np.zeros((bond0, d_bin, d_bin, bond0), dtype=complex)
+    occupations = [range(n + 1) for n in photon_nums]
+    for first_bin_occupations in np.ndindex(*(len(values) for values in occupations)):
+        second_bin_occupations = [
+            n - q for n, q in zip(photon_nums, first_bin_occupations)
+        ]
+        first_index = sum(index[q] for index, q in zip(indices, first_bin_occupations))
+        second_index = sum(
+            index[q] for index, q in zip(indices, second_bin_occupations)
+        )
+        amplitude = 1.0 + 0.0j
+        for ch, (n, q) in enumerate(zip(photon_nums, first_bin_occupations)):
+            amplitude *= np.sqrt(sci.special.comb(n, q))
+            amplitude *= (np.sqrt(delta_t) * pulse_envs[0][ch]) ** q
+            amplitude *= (np.sqrt(delta_t) * pulse_envs[1][ch]) ** (n - q)
+        theta[:, first_index, second_index, :] = amplitude
+
+    left, right = split_pair_left(theta, strategy)
+    return _normalize_open_mps([left, right])
+
+
+def _normalize_open_mps(tensors: list[np.ndarray]) -> list[np.ndarray]:
+    """Normalize a finite MPS when it has scalar open boundaries."""
+    if tensors[0].shape[0] != 1 or tensors[-1].shape[2] != 1:
+        return tensors
+
+    environment = np.ones((1, 1), dtype=complex)
+    for tensor in tensors:
+        environment = np.einsum(
+            "ab,api,bpj->ij",
+            environment,
+            tensor,
+            np.conj(tensor),
+            optimize=True,
+        )
+    norm_squared = float(environment[0, 0].real)
+    if not np.isfinite(norm_squared) or norm_squared <= 0.0:
+        raise ValueError("constructed Fock-pulse MPS has non-positive norm")
+    tensors[0] /= np.sqrt(norm_squared)
     return tensors

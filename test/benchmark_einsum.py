@@ -10,6 +10,7 @@ from typing import Callable
 import numpy as np
 
 import wqedmps as qmps
+import wqedmps.correlation as correlation
 import wqedmps.mps_tools as mps_tools
 import wqedmps.operators as operators
 import wqedmps.simulation as simulation
@@ -38,15 +39,18 @@ def patched_contract_cached(impl: Callable[..., np.ndarray]):
     old_mps = mps_tools.contract_cached
     old_ops = operators.contract_cached
     old_sim = simulation.contract_cached
+    old_corr = correlation.contract_cached
     mps_tools.contract_cached = impl
     operators.contract_cached = impl
     simulation.contract_cached = impl
+    correlation.contract_cached = impl
     try:
         yield
     finally:
         mps_tools.contract_cached = old_mps
         operators.contract_cached = old_ops
         simulation.contract_cached = old_sim
+        correlation.contract_cached = old_corr
 
 
 def benchmark_callable(
@@ -238,7 +242,7 @@ def micro_benchmarks(repeats: int) -> list[BenchResult]:
         ),
         (
             "expectation_2bins",
-            "aikb,jlik,ajlb->",
+            "aikb,ikjl,ajlb->",
             (rand((2, 2, 2, 2)), rand((2, 2, 2, 2)), rand((2, 2, 2, 2))),
             3000,
         ),
